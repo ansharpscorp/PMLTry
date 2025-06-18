@@ -1,0 +1,89 @@
+import pandas as pd
+import numpy as np
+import json
+from sklearn.ensemble import IsolationForest
+from datetime import datetime
+import os
+
+# Config
+CSV_FILE = 'teams_network_data.csv'     # Input CSV path
+OUTPUT_JSON = 'anomaly_alerts.json'     # Alert output
+OUTPUT_CSV = 'powerbi_reflexive_summary.csv' # For Power BI
+ANOMALY_THRESHOLD = -0.15               # IsolationForest threshold
+
+# Read CSV
+df = pd.read_csv(CSV_FILE, parse_dates=['Date'])
+
+# Define function to select Reflexive IP based on Session Type and Stream Direction
+def get_reflexive_ip(row):
+    if row['Session Type'] == 'P2P':
+        return row['First Reflexive Local IP Network'] if row['Stream Direction'] == 'Second to First' else row['Second Reflexive Local IP Network']
+    elif row['Session Type'] == 'Conf':
+        return row['Second Reflexive Local IP Network']  # Conf: always take Second
+    return None
+
+df['ReflexiveIP'] = df.apply(get_reflexive_ip, axis=1)
+
+# Filter only poor calls
+df_poor = df[df['ClassfiedPoorCall'] == True]
+
+# Select network features for anomaly detection
+features = ['Avg Jitter', 'Avg Round Trip Time', 'Avg Packet Loss']
+df_poor = df_poor.dropna(subset=features)
+
+X = df_poor[features]
+
+# Isolation Forest Model
+iso = IsolationForest(n_estimators=100, contamination=0.05, random_state=42)
+df_poor['AnomalyScore'] = iso.fit_predict(X)
+
+# Anomalies: where score == -1
+df_anomaly = df_poor[df_poor['AnomalyScore'] == -1]
+
+# Group by ReflexiveIP to get problem zones
+summary = df_anomaly.groupby('ReflexiveIP').agg({
+    'First Subnet': pd.Series.nunique,
+    'Second Subnet': pd.Series.nunique,
+    'First UPN': pd.Series.nunique,
+    'Second UPN': pd.Series.nunique,
+    'Avg Jitter': 'mean',
+    'Avg Round Trip Time': 'mean',
+    'Stream Direction': lambda x: x.value_counts().to_dict(),
+    'First Network Connection Detail': lambda x: x.value_counts().to_dict(),
+    'Second Network Connection Detail': lambda x: x.value_counts().to_dict(),
+    'Conference Id': pd.Series.nunique
+}).reset_index()
+
+summary.rename(columns={
+    'First Subnet': 'Unique First Subnets',
+    'Second Subnet': 'Unique Second Subnets',
+    'First UPN': 'Unique First UPNs',
+    'Second UPN': 'Unique Second UPNs',
+    'Conference Id': 'Affected Conferences'
+}, inplace=True)
+
+# For Power BI (CSV) Export
+summary.to_csv(OUTPUT_CSV, index=False)
+
+# Create JSON alert
+alerts = []
+for _, row in summary.iterrows():
+    alert = {
+        'ReflexiveIP': row['ReflexiveIP'],
+        'UniqueFirstSubnets': int(row['Unique First Subnets']),
+        'UniqueSecondSubnets': int(row['Unique Second Subnets']),
+        'UniqueFirstUPNs': int(row['Unique First UPNs']),
+        'UniqueSecondUPNs': int(row['Unique Second UPNs']),
+        'AvgJitter': row['Avg Jitter'],
+        'AvgRoundTrip': row['Avg Round Trip Time'],
+        'AffectedConferences': int(row['Affected Conferences']),
+        'StreamDirections': row['Stream Direction'],
+        'FirstNetworkType': row['First Network Connection Detail'],
+        'SecondNetworkType': row['Second Network Connection Detail']
+    }
+    alerts.append(alert)
+
+with open(OUTPUT_JSON, 'w') as f:
+    json.dump(alerts, f, indent=4)
+
+print(f"Analysis complete. Summary CSV: {OUTPUT_CSV} | JSON Alerts: {OUTPUT_JSON}")
