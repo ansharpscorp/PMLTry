@@ -1,0 +1,63 @@
+WITH UniqueParticipants AS (
+    SELECT
+        [Date],
+        [Conference Id],
+        COALESCE([Second UPN], [Second Phone Number]) AS Participant
+    FROM CallRecords
+    WHERE COALESCE([Second UPN], [Second Phone Number]) IS NOT NULL
+    GROUP BY [Date], [Conference Id], COALESCE([Second UPN], [Second Phone Number])
+),
+ParticipantCounts AS (
+    SELECT
+        [Date],
+        [Conference Id],
+        COUNT(DISTINCT Participant) AS UniqueParticipants
+    FROM UniqueParticipants
+    GROUP BY [Date], [Conference Id]
+),
+ConferenceBuckets AS (
+    SELECT
+        [Date],
+        [Conference Id],
+        UniqueParticipants,
+        CASE 
+            WHEN UniqueParticipants < 10 THEN '<10 Participants'
+            WHEN UniqueParticipants BETWEEN 10 AND 25 THEN '10-25 Participants'
+            WHEN UniqueParticipants BETWEEN 26 AND 100 THEN '26-100 Participants'
+            ELSE '>100 Participants'
+        END AS Bucket
+    FROM ParticipantCounts
+),
+MediaPresence AS (
+    SELECT
+        [Date],
+        [Conference Id],
+        MAX(CASE WHEN [Media Type] = 'Audio' THEN 1 ELSE 0 END) AS HasAudio,
+        MAX(CASE WHEN [Media Type] = 'Video' THEN 1 ELSE 0 END) AS HasVideo
+    FROM CallRecords
+    GROUP BY [Date], [Conference Id]
+),
+MediaCounts AS (
+    SELECT
+        [Date],
+        [Conference Id],
+        -- If Video exists, count 1 as Video; else if only Audio, count 1 as Audio
+        CASE WHEN HasVideo = 1 THEN 1 ELSE 0 END AS VideoCount,
+        CASE WHEN HasVideo = 0 AND HasAudio = 1 THEN 1 ELSE 0 END AS AudioCount
+    FROM MediaPresence
+)
+SELECT
+    cb.[Date],
+    cb.Bucket,
+    COUNT(DISTINCT cb.[Conference Id]) AS TotalUniqueConferences,
+    SUM(mc.AudioCount) AS CountOfAudioCalls,
+    SUM(mc.VideoCount) AS CountOfVideoCalls
+FROM ConferenceBuckets cb
+JOIN MediaCounts mc
+    ON cb.[Date] = mc.[Date] AND cb.[Conference Id] = mc.[Conference Id]
+GROUP BY
+    cb.[Date],
+    cb.Bucket
+ORDER BY
+    cb.[Date],
+    cb.Bucket;
