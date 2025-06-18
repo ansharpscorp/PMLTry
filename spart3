@@ -1,0 +1,78 @@
+WITH UniqueParticipants AS (
+    -- Get unique participants per Conference Id
+    SELECT
+        [Date],
+        [Conference Id],
+        COALESCE([Second UPN], [Second Phone Number]) AS Participant
+    FROM CallRecords
+    WHERE COALESCE([Second UPN], [Second Phone Number]) IS NOT NULL
+    GROUP BY [Date], [Conference Id], COALESCE([Second UPN], [Second Phone Number])
+),
+ParticipantCounts AS (
+    -- Count unique participants per Conference Id
+    SELECT
+        [Date],
+        [Conference Id],
+        COUNT(DISTINCT Participant) AS UniqueParticipants
+    FROM UniqueParticipants
+    GROUP BY [Date], [Conference Id]
+),
+ConferenceBuckets AS (
+    -- Assign participant buckets
+    SELECT
+        pc.[Date],
+        pc.[Conference Id],
+        pc.UniqueParticipants,
+        CASE 
+            WHEN pc.UniqueParticipants < 10 THEN '<10 Participants'
+            WHEN pc.UniqueParticipants BETWEEN 10 AND 25 THEN '10-25 Participants'
+            WHEN pc.UniqueParticipants BETWEEN 26 AND 100 THEN '26-100 Participants'
+            ELSE '>100 Participants'
+        END AS Bucket,
+        CASE 
+            WHEN pc.UniqueParticipants < 10 THEN 1
+            WHEN pc.UniqueParticipants BETWEEN 10 AND 25 THEN 2
+            WHEN pc.UniqueParticipants BETWEEN 26 AND 100 THEN 3
+            ELSE 4
+        END AS BucketOrder
+    FROM ParticipantCounts pc
+),
+ParticipantMediaUsage AS (
+    -- Find media type usage per participant per conference
+    SELECT
+        [Date],
+        [Conference Id],
+        COALESCE([Second UPN], [Second Phone Number]) AS Participant,
+        MAX(CASE WHEN [Media Type] = 'Audio' THEN 1 ELSE 0 END) AS UsedAudio,
+        MAX(CASE WHEN [Media Type] = 'Video' THEN 1 ELSE 0 END) AS UsedVideo
+    FROM CallRecords
+    WHERE COALESCE([Second UPN], [Second Phone Number]) IS NOT NULL
+    GROUP BY [Date], [Conference Id], COALESCE([Second UPN], [Second Phone Number])
+),
+MediaCountsPerConference AS (
+    -- Count participants who used Audio or Video per conference
+    SELECT
+        [Date],
+        [Conference Id],
+        SUM(UsedAudio) AS AudioParticipantCount,
+        SUM(UsedVideo) AS VideoParticipantCount
+    FROM ParticipantMediaUsage
+    GROUP BY [Date], [Conference Id]
+)
+SELECT
+    cb.[Date],
+    cb.Bucket,
+    cb.BucketOrder,
+    COUNT(DISTINCT cb.[Conference Id]) AS TotalUniqueConferences,
+    SUM(mc.AudioParticipantCount) AS TotalAudioCalls,
+    SUM(mc.VideoParticipantCount) AS TotalVideoCalls
+FROM ConferenceBuckets cb
+JOIN MediaCountsPerConference mc
+    ON cb.[Date] = mc.[Date] AND cb.[Conference Id] = mc.[Conference Id]
+GROUP BY
+    cb.[Date],
+    cb.Bucket,
+    cb.BucketOrder
+ORDER BY
+    cb.[Date],
+    cb.BucketOrder;
