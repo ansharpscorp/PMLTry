@@ -1,0 +1,18 @@
+{
+  "ReflexiveIP": "",
+  "TotalAnomalyCount_Last30Days": 25,
+  "TotalAnomalyCount_Last7Days": 12,
+  "DatesWithAnomalies": ["2025-06-12", "2025-06-13", "2025-06-15"],
+  "FirstSubnets": ["10.1.1.0/24", "10.1.2.0/24"],
+  "SecondSubnets": ["172.16.5.0/24"],
+  "UniqueFirstUPNs": ["user1@domain.com", "user2@domain.com"],
+  "UniqueSecondUPNs": ["user3@domain.com"],
+  "ConnectionType": {
+    "FirstNetwork": {"Wired": 8, "Wifi": 4},
+    "SecondNetwork": {"Wired": 5, "Wifi": 7}
+  },
+  "AvgJitter": 35.4,
+  "AvgRoundTripTime": 180.2,
+  "AvgPacketLoss": 1.8,
+  "RecurringPattern": "Likely pattern on Mondays, 9AM-11AM detected by Prophet"
+}
