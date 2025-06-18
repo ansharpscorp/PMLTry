@@ -1,0 +1,54 @@
+WITH UniqueParticipants AS (
+    SELECT
+        [Date],
+        [Conference Id],
+        COALESCE([Second UPN], [Second Phone Number]) AS Participant
+    FROM CallRecords
+    WHERE COALESCE([Second UPN], [Second Phone Number]) IS NOT NULL
+    GROUP BY [Date], [Conference Id], COALESCE([Second UPN], [Second Phone Number])
+),
+ParticipantCounts AS (
+    SELECT
+        [Date],
+        [Conference Id],
+        COUNT(DISTINCT Participant) AS UniqueParticipants
+    FROM UniqueParticipants
+    GROUP BY [Date], [Conference Id]
+),
+ConferenceBuckets AS (
+    SELECT
+        [Date],
+        [Conference Id],
+        UniqueParticipants,
+        CASE 
+            WHEN UniqueParticipants < 10 THEN '<10 Participants'
+            WHEN UniqueParticipants BETWEEN 10 AND 25 THEN '10-25 Participants'
+            WHEN UniqueParticipants BETWEEN 26 AND 100 THEN '26-100 Participants'
+            ELSE '>100 Participants'
+        END AS Bucket
+    FROM ParticipantCounts
+),
+MediaCounts AS (
+    SELECT
+        [Date],
+        [Conference Id],
+        SUM(CASE WHEN [Media Type] = 'Audio' THEN 1 ELSE 0 END) AS AudioCount,
+        SUM(CASE WHEN [Media Type] = 'Video' THEN 1 ELSE 0 END) AS VideoCount
+    FROM CallRecords
+    GROUP BY [Date], [Conference Id]
+)
+SELECT
+    cb.[Date],
+    COUNT(DISTINCT cb.[Conference Id]) AS TotalUniqueConferences,
+    cb.Bucket,
+    SUM(mc.AudioCount) AS CountOfAudioCalls,
+    SUM(mc.VideoCount) AS CountOfVideoCalls
+FROM ConferenceBuckets cb
+JOIN MediaCounts mc
+    ON cb.[Date] = mc.[Date] AND cb.[Conference Id] = mc.[Conference Id]
+GROUP BY
+    cb.[Date],
+    cb.Bucket
+ORDER BY
+    cb.[Date],
+    cb.Bucket;
