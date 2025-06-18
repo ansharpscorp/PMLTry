@@ -1,3 +1,5 @@
+=PROPER(MID(A1, FIND(".", A1)+1, FIND("@", A1)-FIND(".", A1)-1)) & ", " & PROPER(LEFT(A1, FIND(".", A1)-1))
+
 {
   "ReflexiveIP": "",
   "TotalAnomalyCount_Last30Days": 25,
