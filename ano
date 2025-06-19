@@ -1,0 +1,43 @@
+from sklearn.ensemble import IsolationForest
+from src.config import CONFIG
+import pandas as pd
+
+def detect_anomalies(df):
+    anomalies_list = []
+
+    for stype in CONFIG['session_type_analysis']:
+        df_type = df[df['Session Type'] == stype].copy()
+
+        if df_type.empty:
+            print(f"Warning: No data for session type: {stype}")
+            continue
+
+        features = ['AvgJitter', 'AvgRoundTripTime', 'AvgPacketLoss']
+        X = df_type[features].fillna(0)
+
+        if len(X) < 1:
+            print(f"Skipping IsolationForest for {stype} — no valid samples.")
+            continue
+
+        # ML-based detection
+        model = IsolationForest(contamination=0.05, random_state=42)
+        df_type['Anomaly'] = model.fit_predict(X)
+        df_type_ml = df_type[df_type['Anomaly'] == -1]
+
+        # Manual threshold detection
+        manual_anomalies = df_type[
+            (df_type['AvgJitter'] > 50) |
+            (df_type['AvgRoundTripTime'] > 300) |
+            (df_type['AvgPacketLoss'] > 2)
+        ]
+        manual_anomalies['Anomaly'] = -1  # mark manually detected
+
+        # Combine both
+        combined_anomalies = pd.concat([df_type_ml, manual_anomalies]).drop_duplicates()
+
+        anomalies_list.append(combined_anomalies)
+
+    if anomalies_list:
+        return pd.concat(anomalies_list, ignore_index=True)
+    else:
+        return pd.DataFrame()
