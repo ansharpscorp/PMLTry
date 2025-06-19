@@ -1,0 +1,11 @@
+DECLARE @UserList TABLE (UserUPN NVARCHAR(255));
+
+-- Example list of users
+INSERT INTO @UserList (UserUPN)
+VALUES ('user1@domain.com'), ('user2@domain.com'), ('user3@domain.com');
+
+-- Query to check existence
+SELECT DISTINCT ul.UserUPN, 
+       CASE WHEN t.[Second UPN] IS NOT NULL THEN 'Exists' ELSE 'Not Found' END AS Status
+FROM @UserList ul
+LEFT JOIN YourTableName t ON ul.UserUPN = t.[Second UPN];
