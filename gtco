@@ -1,0 +1,104 @@
+// Project 2: Teams CDR Fetch and Save to SQL
+// .NET Framework 4.8 Console App
+
+using System;
+using System.Collections.Generic;
+using System.Data.SqlClient;
+using System.Net.Http;
+using System.Net.Http.Headers;
+using System.Text.Json;
+using System.Threading.Tasks;
+
+namespace TeamsCdrToSql
+{
+    class Program
+    {
+        static async Task Main(string[] args)
+        {
+            string token = await GetAccessToken();
+            List<CallRecord> records = await FetchCallRecords(token, "2025-04-30T00:00:00Z", "2025-04-30T00:15:00Z");
+
+            foreach (var record in records)
+            {
+                SaveToSql(record);
+            }
+
+            Console.WriteLine("Done. Press any key to exit.");
+            Console.ReadKey();
+        }
+
+        static async Task<string> GetAccessToken()
+        {
+            var client = new HttpClient();
+            var body = new Dictionary<string, string>
+            {
+                {"client_id", "YOUR_CLIENT_ID"},
+                {"scope", "https://graph.microsoft.com/.default"},
+                {"client_secret", "YOUR_CLIENT_SECRET"},
+                {"grant_type", "client_credentials"}
+            };
+            var req = new HttpRequestMessage(HttpMethod.Post, "https://login.microsoftonline.com/YOUR_TENANT_ID/oauth2/v2.0/token")
+            {
+                Content = new FormUrlEncodedContent(body)
+            };
+            var res = await client.SendAsync(req);
+            var json = await res.Content.ReadAsStringAsync();
+            using (JsonDocument doc = JsonDocument.Parse(json))
+            {
+                return doc.RootElement.GetProperty("access_token").GetString();
+            }
+        }
+
+        static async Task<List<CallRecord>> FetchCallRecords(string token, string startDateTime, string endDateTime)
+        {
+            var client = new HttpClient();
+            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+            string url = $"https://graph.microsoft.com/beta/communications/callRecords?$filter=startDateTime ge {startDateTime} and startDateTime lt {endDateTime}";
+            var res = await client.GetAsync(url);
+            string json = await res.Content.ReadAsStringAsync();
+
+            var records = new List<CallRecord>();
+            using (JsonDocument doc = JsonDocument.Parse(json))
+            {
+                foreach (var item in doc.RootElement.GetProperty("value").EnumerateArray())
+                {
+                    records.Add(new CallRecord
+                    {
+                        Id = item.GetProperty("id").GetString(),
+                        Type = item.GetProperty("type").GetString(),
+                        StartDateTime = item.GetProperty("startDateTime").GetString(),
+                        EndDateTime = item.GetProperty("endDateTime").GetString()
+                    });
+                }
+            }
+            return records;
+        }
+
+        static void SaveToSql(CallRecord record)
+        {
+            string connectionString = "Server=YOUR_SQL_SERVER;Database=YOUR_DATABASE;Trusted_Connection=True;";
+            string insertQuery = "INSERT INTO CallRecords (Id, Type, StartDateTime, EndDateTime) VALUES (@Id, @Type, @StartDateTime, @EndDateTime);";
+
+            using (SqlConnection conn = new SqlConnection(connectionString))
+            {
+                conn.Open();
+                using (SqlCommand cmd = new SqlCommand(insertQuery, conn))
+                {
+                    cmd.Parameters.AddWithValue("@Id", record.Id);
+                    cmd.Parameters.AddWithValue("@Type", record.Type);
+                    cmd.Parameters.AddWithValue("@StartDateTime", record.StartDateTime);
+                    cmd.Parameters.AddWithValue("@EndDateTime", record.EndDateTime);
+                    cmd.ExecuteNonQuery();
+                }
+            }
+        }
+    }
+
+    class CallRecord
+    {
+        public string Id { get; set; }
+        public string Type { get; set; }
+        public string StartDateTime { get; set; }
+        public string EndDateTime { get; set; }
+    }
+}
