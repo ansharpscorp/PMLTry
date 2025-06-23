@@ -1,0 +1,5 @@
+Import-Module ./GraphCDRModule.psm1
+$date = "2025-05-31"  # YYYY-MM-DD format
+
+Get-AccessToken
+Run-ParallelCDRFetch -Date $date
