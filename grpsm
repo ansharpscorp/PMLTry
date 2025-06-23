@@ -1,0 +1,113 @@
+Import-Module Microsoft.PowerShell.Utility
+
+$global:TokenExpiry = (Get-Date).AddMinutes(-5)
+$global:AccessToken = ""
+
+function Write-Log {
+    param ($Message)
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $logFile = "./logs/$((Get-Date -Format 'yyyyMMdd_HHmmss')).log"
+    Add-Content -Path $logFile -Value "$timestamp : $Message"
+}
+
+function Get-Config {
+    return Get-Content -Path "./config.json" | ConvertFrom-Json
+}
+
+function Get-AccessToken {
+    $config = Get-Config
+    $body = @{
+        client_id     = $config.ClientId
+        scope         = $config.Scope
+        client_secret = $config.ClientSecret
+        grant_type    = "client_credentials"
+    }
+
+    $response = Invoke-RestMethod -Uri "https://login.microsoftonline.com/$($config.TenantId)/oauth2/v2.0/token" `
+        -Method Post -Body $body -ContentType "application/x-www-form-urlencoded"
+
+    $global:AccessToken = $response.access_token
+    $global:TokenExpiry = (Get-Date).AddSeconds($response.expires_in - 300)
+}
+
+function Refresh-AccessToken {
+    if ((Get-Date) -ge $global:TokenExpiry) {
+        Write-Log "Refreshing Access Token..."
+        Get-AccessToken
+    }
+}
+
+function Invoke-GraphAPIRequest {
+    param (
+        [string]$Uri
+    )
+    Refresh-AccessToken
+    $headers = @{ Authorization = "Bearer $global:AccessToken" }
+    $allData = @()
+
+    do {
+        $response = Invoke-RestMethod -Uri $Uri -Headers $headers -Method Get
+        $allData += $response.value
+        $Uri = $response.'@odata.nextLink'
+    } while ($Uri)
+
+    return $allData
+}
+
+function Get-CDRData {
+    param (
+        [string]$StartTime,
+        [string]$EndTime
+    )
+
+    $url = "https://graph.microsoft.com/v1.0/communications/callRecords/getCallRecords?" +
+           "`$filter=startDateTime ge $StartTime and endDateTime le $EndTime&`$select=id,type,lastModifiedDateTime,startDateTime,endDateTime"
+
+    try {
+        $data = Invoke-GraphAPIRequest -Uri $url
+        return $data
+    } catch {
+        Write-Log "Error fetching data for $StartTime to $EndTime : $_"
+        return @()
+    }
+}
+
+function Save-ToCSV {
+    param (
+        [array]$Data,
+        [string]$FilePath
+    )
+    $Data | Select-Object id, type, lastModifiedDateTime, startDateTime, endDateTime | Export-Csv -Path $FilePath -NoTypeInformation -Force
+}
+
+function Run-ParallelCDRFetch {
+    param (
+        [datetime]$Date
+    )
+
+    $config = Get-Config
+    $start = [datetime]::ParseExact("$Date 00:00:00", "yyyy-MM-dd HH:mm:ss", $null)
+    $end = $start.AddDays(1)
+
+    $jobs = @()
+
+    while ($start -lt $end) {
+        $intervalStart = $start.ToString("yyyy-MM-ddTHH:mm:ssZ")
+        $intervalEnd = $start.AddMinutes(15).ToString("yyyy-MM-ddTHH:mm:ssZ")
+        $outputFile = "$($config.OutputDirectory)/$($Date.ToString('yyyyMMdd'))_$($start.ToString('HHmm'))_$($start.AddMinutes(15).ToString('HHmm')).csv"
+
+        $jobs += Start-Job -ScriptBlock {
+            param($s, $e, $f)
+            Import-Module ./GraphCDRModule.psm1
+            $data = Get-CDRData -StartTime $s -EndTime $e
+            Save-ToCSV -Data $data -FilePath $f
+        } -ArgumentList $intervalStart, $intervalEnd, $outputFile
+
+        $start = $start.AddMinutes(15)
+    }
+
+    Write-Log "Started $($jobs.Count) parallel jobs."
+
+    $jobs | ForEach-Object { Receive-Job -Job $_ -Wait; Remove-Job -Job $_ }
+    Write-Log "All jobs completed."
+}
