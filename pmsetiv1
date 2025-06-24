@@ -1,0 +1,217 @@
+📁 **Complete Project Source Code: CQD_ML_Project (Latest with Feedback Issue & Sentiment)**
+
+---
+
+### 1️⃣ config/business_rules.json
+```json
+{
+    "jitter_threshold": 30,
+    "round_trip_threshold": 300,
+    "packet_loss_threshold": 0.05,
+    "feedback_sentiment_threshold": 0.2,
+    "feedback_rating_threshold": 0,
+    "alert_user_count_threshold": 50,
+    "alert_subnet_count_threshold": 20,
+    "suggestions": {
+        "High Jitter": "Optimize WAN or check QoS settings.",
+        "High Round Trip": "Inspect WAN routing or investigate latency sources.",
+        "High Packet Loss": "Check network stability and packet routing.",
+        "Negative Feedback": "Review user feedback and investigate user-side issues."
+    }
+}
+```
+
+---
+
+### 2️⃣ src/data_prep.py
+```python
+import pandas as pd
+
+def preprocess_data(df):
+    null_cols = [
+        'Total Stream Count', 'Audio Stream Count', 'Audio Poor Stream Count',
+        'Video Stream Count', 'Video Poor Stream Count',
+        'Total CDR Available Stream Count', 'Total Call Setup Failed Stream Count',
+        'Total Call Succeeded Stream Count', 'Total Call Dropped Stream Count',
+        'Avg Jitter', 'Avg Jitter Max', 'Avg Round Trip', 'Avg Round Trip Max',
+        'Avg Packet Loss Rate', 'Avg Packet Loss Rate Max'
+    ]
+    df[null_cols] = df[null_cols].fillna(0)
+
+    df['ClassifiedPoorCall'] = df.apply(
+        lambda row: True if (row['Audio Poor Stream Count'] >= 1 or row['Video Poor Stream Count'] >= 1) else row['ClassifiedPoorCall'],
+        axis=1
+    )
+    return df
+```
+
+---
+
+### 3️⃣ src/anomaly_detection.py
+```python
+from sklearn.ensemble import IsolationForest
+
+def detect_anomalies(df, features, threshold):
+    model = IsolationForest(contamination=threshold)
+    df['Anomaly'] = model.fit_predict(df[features])
+    return df[df['Anomaly'] == -1]
+```
+
+---
+
+### 4️⃣ src/xgboost_model.py
+```python
+import xgboost as xgb
+from sklearn.model_selection import train_test_split
+
+def xgboost_train(df, features, label):
+    X = df[features]
+    y = df[label]
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3)
+    model = xgb.XGBClassifier()
+    model.fit(X_train, y_train)
+    return model
+```
+
+---
+
+### 5️⃣ src/clustering.py
+```python
+from sklearn.cluster import KMeans
+
+def cluster_data(df, features):
+    kmeans = KMeans(n_clusters=3)
+    df['Cluster'] = kmeans.fit_predict(df[features])
+    return df
+```
+
+---
+
+### 6️⃣ src/forecasting.py
+```python
+import pandas as pd
+from sklearn.linear_model import LinearRegression
+
+def forecast_metric(df, date_col, target_cols):
+    forecasts = {}
+    df[date_col] = pd.to_datetime(df[date_col])
+    df['Day'] = df[date_col].dt.dayofyear
+
+    for target_col in target_cols:
+        model = LinearRegression()
+        model.fit(df[['Day']], df[target_col])
+        forecasts[target_col] = model
+
+    return forecasts
+```
+
+---
+
+### 7️⃣ src/feedback_analysis.py
+```python
+from textblob import TextBlob
+
+def apply_feedback_sentiment(df):
+    df['Feedback Sentiment'] = df['Second Feedback Text'].fillna('').apply(lambda x: TextBlob(x).sentiment.polarity)
+    return df
+
+def evaluate_feedback_issue(df, rating_threshold):
+    df['Feedback Issue'] = df['Second Feedback Rating Poor Count'] > rating_threshold
+    return df
+```
+
+---
+
+### 8️⃣ src/alert_generator.py
+```python
+import json
+import os
+
+def generate_alert(df, anomalies, rules, output_path):
+    reflexive_groups = anomalies.groupby('Second Reflexive Local IP Network')
+    os.makedirs(output_path, exist_ok=True)
+
+    for reflexive_ip, group in reflexive_groups:
+        subnet_groups = group.groupby('Second Reflexive Local IP Network')
+        subnet_details = {}
+        feedback_group = group[group['Feedback Issue'] == True]
+        feedback_users_count = feedback_group['Second UPN'].nunique()
+        feedback_text_list = feedback_group['Second Feedback Text'].dropna().unique().tolist()
+
+        for subnet, subnet_group in subnet_groups:
+            upn_count = subnet_group['Second UPN'].nunique()
+            if upn_count > rules['alert_user_count_threshold']:
+                issues = []
+                if (subnet_group['Avg Jitter'] > rules['jitter_threshold']).any():
+                    issues.append({"Issue": "High Jitter", "Recommendation": rules['suggestions']['High Jitter']})
+                if (subnet_group['Avg Round Trip'] > rules['round_trip_threshold']).any():
+                    issues.append({"Issue": "High Round Trip", "Recommendation": rules['suggestions']['High Round Trip']})
+                if (subnet_group['Avg Packet Loss Rate'] > rules['packet_loss_threshold']).any():
+                    issues.append({"Issue": "High Packet Loss", "Recommendation": rules['suggestions']['High Packet Loss']})
+                if ((subnet_group['Feedback Sentiment'] < rules['feedback_sentiment_threshold']) | (subnet_group['Feedback Issue'])).any():
+                    issues.append({"Issue": "Negative Feedback", "Recommendation": rules['suggestions']['Negative Feedback']})
+                subnet_details[subnet] = {"UsersAffected": int(upn_count), "Issues": issues}
+
+        alert = {
+            "ReflexiveIP": reflexive_ip,
+            "AnomalyCount": len(group),
+            "DatesAffected": list(group['Date'].unique()),
+            "UsersAffected": group['Second UPN'].nunique(),
+            "MediaTypeAffected": group['Media Type'].value_counts().to_dict(),
+            "ConnectionTypeAffected": group['Second Network Connection Detail'].value_counts().to_dict(),
+            "HighlyAffectedSubnets": subnet_details,
+            "FeedbackAnalysis": {
+                "UsersWithPoorFeedback": int(feedback_users_count),
+                "FeedbackTexts": feedback_text_list
+            },
+            "Remediation": []
+        }
+        filename = f"alerts_{reflexive_ip.replace('.', '_')}.json"
+        with open(os.path.join(output_path, filename), 'w') as f:
+            json.dump(alert, f, indent=4)
+```
+
+---
+
+### 9️⃣ main.py
+```python
+import pandas as pd
+import json
+from src.data_prep import preprocess_data
+from src.anomaly_detection import detect_anomalies
+from src.xgboost_model import xgboost_train
+from src.clustering import cluster_data
+from src.forecasting import forecast_metric
+from src.feedback_analysis import apply_feedback_sentiment, evaluate_feedback_issue
+from src.alert_generator import generate_alert
+
+config = json.load(open('config/business_rules.json'))
+rules = config
+df = pd.read_csv('data/teams_cqd_data.csv')
+
+df = preprocess_data(df)
+df = apply_feedback_sentiment(df)
+df = evaluate_feedback_issue(df, rules['feedback_rating_threshold'])
+anomaly_features = ['Avg Jitter', 'Avg Round Trip', 'Avg Packet Loss Rate', 'Feedback Issue', 'Feedback Sentiment']
+anomalies = detect_anomalies(df, anomaly_features, 0.01)
+model = xgboost_train(df, anomaly_features, 'ClassifiedPoorCall')
+df = cluster_data(df, anomaly_features)
+forecast_targets = ['Avg Jitter', 'Avg Round Trip', 'Avg Packet Loss Rate']
+forecasts = forecast_metric(df, 'Date', forecast_targets)
+generate_alert(df, anomalies, rules, 'output')
+print("All alerts and forecasts generated successfully.")
+```
+
+---
+
+### 🔟 requirements.txt
+```
+pandas
+scikit-learn
+xgboost
+textblob
+```
+
+---
+
+✅ **All project files updated to include both 'Feedback Issue' and 'Feedback Sentiment' in anomaly detection. Ready to copy or package.**
