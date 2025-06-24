@@ -1,0 +1,134 @@
+# ======================
+# Project Structure
+# ======================
+# /GraphCallRecordsModule
+# ├── config.json
+# ├── Run-GraphCallRecords.ps1
+# └── Modules
+#     └── GraphAPIHelper.psm1
+
+# ======================
+# config.json
+# ======================
+{
+  "TenantId": "<Your-Tenant-ID>",
+  "ClientId": "<Your-Client-ID>",
+  "ClientSecret": "<Your-Client-Secret>",
+  "Scope": "https://graph.microsoft.com/.default",
+  "StartHour": 0,
+  "EndHour": 24,
+  "Date": "2025-05-31",
+  "OutputBaseFolder": "C:/GraphCallRecords/Output",
+  "ParallelThreads": 4,
+  "TokenExpiryBufferMinutes": 5,
+  "RetryMaxAttempts": 3,
+  "RetryDelaySeconds": 5,
+  "LogFile": "C:/GraphCallRecords/log.txt"
+}
+
+# ======================
+# Modules/GraphAPIHelper.psm1
+# ======================
+function Write-Log {
+    param(
+        [string]$Message,
+        [string]$LogFile
+    )
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    Add-Content -Path $LogFile -Value "[$timestamp] $Message"
+}
+
+function Get-GraphToken {
+    param($Config)
+    Write-Log -Message "Fetching new Graph Token..." -LogFile $Config.LogFile
+    $body = @{
+        client_id     = $Config.ClientId
+        scope         = $Config.Scope
+        client_secret = $Config.ClientSecret
+        grant_type    = "client_credentials"
+    }
+    $response = Invoke-RestMethod -Uri "https://login.microsoftonline.com/$($Config.TenantId)/oauth2/v2.0/token" -Method Post -Body $body -ContentType 'application/x-www-form-urlencoded'
+    return @{ Token = $response.access_token; Expiry = (Get-Date).AddSeconds($response.expires_in) }
+}
+
+function Ensure-GraphToken {
+    param($TokenInfo, $Config)
+    if ($null -eq $TokenInfo -or ((New-TimeSpan -Start (Get-Date) -End $TokenInfo.Expiry).TotalMinutes -lt $Config.TokenExpiryBufferMinutes)) {
+        return Get-GraphToken -Config $Config
+    }
+    return $TokenInfo
+}
+
+function Invoke-GraphApiCall {
+    param($Url, $TokenInfo, $Config)
+    $allData = @()
+    $attempt = 0
+    do {
+        $attempt++
+        try {
+            $headers = @{ Authorization = "Bearer $($TokenInfo.Token)" }
+            do {
+                Write-Log -Message "Calling Graph API: $Url" -LogFile $Config.LogFile
+                $response = Invoke-RestMethod -Uri $Url -Headers $headers -Method Get -ErrorAction Stop
+                if ($response.value) { $allData += $response.value }
+                $Url = $response.'@odata.nextLink'
+                Start-Sleep -Seconds 1
+            } while ($Url)
+            return $allData
+        } catch {
+            Write-Log -Message "Error occurred on attempt $attempt: $($_.Exception.Message)" -LogFile $Config.LogFile
+            Start-Sleep -Seconds $Config.RetryDelaySeconds
+        }
+    } while ($attempt -lt $Config.RetryMaxAttempts)
+    throw "API call failed after retries."
+}
+
+function Fetch-15MinData {
+    param($Hour, $Minute, $Config, $TokenInfo)
+    $startTime = [datetime]::ParseExact("$($Config.Date) $Hour`:$Minute`:`0", "yyyy-MM-dd H:mm:ss", $null)
+    $endTime = $startTime.AddMinutes(15)
+    $startTimeUtc = $startTime.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+    $endTimeUtc = $endTime.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+    $url = "https://graph.microsoft.com/v1.0/communications/callRecords?`$filter=startDateTime ge $startTimeUtc and endDateTime le $endTimeUtc&`$select=id,type"
+    return Invoke-GraphApiCall -Url $url -TokenInfo $TokenInfo -Config $Config
+}
+
+Export-ModuleMember -Function *
+
+# ======================
+# Run-GraphCallRecords.ps1
+# ======================
+$Config = Get-Content -Raw -Path "./config.json" | ConvertFrom-Json
+Import-Module "./Modules/GraphAPIHelper.psm1"
+
+# Prepare Output & Log Paths
+$DateFolder = (Get-Date ($Config.Date) -Format 'yyyyMMdd')
+$OutputFolder = Join-Path $Config.OutputBaseFolder $DateFolder
+if (-not (Test-Path $OutputFolder)) { New-Item -ItemType Directory -Path $OutputFolder | Out-Null }
+
+$LogFile = $Config.LogFile
+if (-not (Test-Path $LogFile)) { New-Item -ItemType File -Path $LogFile | Out-Null }
+
+$TokenInfo = Get-GraphToken -Config $Config
+
+for ($hour = $Config.StartHour; $hour -lt $Config.EndHour; $hour++) {
+    $intervals = @(0, 15, 30, 45)
+    $results = $intervals | ForEach-Object -Parallel {
+        Import-Module "$using:PWD/Modules/GraphAPIHelper.psm1"
+        $data = Fetch-15MinData -Hour $using:hour -Minute $_ -Config $using:Config -TokenInfo $using:TokenInfo
+        return $data
+    } -ThrottleLimit $Config.ParallelThreads
+
+    $combinedData = @()
+    foreach ($batch in $results) {
+        if ($batch) { $combinedData += $batch }
+    }
+
+    $fileName = "{0}/ConfId_{1}_{2:00}_{3:00}.csv" -f $OutputFolder, ($Config.Date -replace '-',''), $hour, ($hour + 1)
+    if ($combinedData.Count -gt 0) {
+        $combinedData | Select-Object id, type | Export-Csv -Path $fileName -NoTypeInformation -Encoding UTF8
+    } else {
+        [PSCustomObject]@{id="";type=""} | Export-Csv -Path $fileName -NoTypeInformation -Encoding UTF8
+    }
+    Write-Log -Message "Saved hourly file: $fileName" -LogFile $Config.LogFile
+}
