@@ -1,0 +1,79 @@
+# Directory Structure:
+# project/
+# ├── config/
+# │   ├── business_rules.json
+# │   └── settings.json
+# ├── data/
+# │   └── alerts/
+# ├── models/
+# │   ├── isolation_forest.py
+# │   ├── xgboost_model.py
+# │   └── prophet_forecast.py
+# ├── utils/
+# │   ├── db_connect.py
+# │   ├── preprocess.py
+# │   ├── feature_engineering.py
+# │   ├── feedback_analysis.py
+# │   └── alert_structure.py
+# └── main.py
+
+# [unchanged files omitted for brevity]
+
+# File: utils/alert_structure.py
+from collections import defaultdict
+
+def build_alert_structure(ip_group, feedback_df, rules):
+    # Filter rows with high anomalies
+    poor_device_df = ip_group[
+        (ip_group['ClassifiedPoorCall'] == True) |
+        (ip_group['Avg Jitter'] > rules['jitter_threshold']) |
+        (ip_group['Avg Packet Loss Rate'] > rules['packet_loss_threshold']) |
+        (ip_group['Second Feedback Rating Poor Count'] > 0)
+    ]
+
+    alert = {
+        "ReflexiveIP": ip_group['Second Reflexive Local IP Network'].iloc[0],
+        "AnomalyCount": len(ip_group),
+        "DatesAffected": sorted(ip_group['Date'].astype(str).unique().tolist()),
+        "UsersAffected": ip_group['Second UPN'].nunique(),
+        "MediaTypeAffected": ip_group['Media Type'].value_counts().to_dict(),
+        "ConnectionTypeAffected": ip_group['Second Network Connection Detail'].value_counts().to_dict(),
+        "VDI Versions": ip_group['Second Client VDI Version'].value_counts().to_dict(),
+        "MostUsedCaptureDevices": poor_device_df['Second Capture Dev Name'].value_counts().head(5).index.tolist(),
+        "MostUsedRenderDevices": poor_device_df['Second Render Dev Name'].value_counts().head(5).index.tolist(),
+        "HighlyAffectedSubnets": {},
+        "FeedbackAnalysis": {
+            "UsersWithPoorFeedback": 0,
+            "FeedbackTexts": []
+        },
+        "Remediation": []
+    }
+
+    for subnet, sub_df in ip_group.groupby('Second Subnet'):
+        issue_list = []
+        if sub_df['Avg Jitter'].mean() > rules['jitter_threshold']:
+            issue_list.append({"Issue": "High Jitter", "Recommendation": rules['suggestions']['High Jitter']})
+        if sub_df['Avg Round Trip'].mean() > rules['round_trip_threshold']:
+            issue_list.append({"Issue": "High Round Trip", "Recommendation": rules['suggestions']['High Round Trip']})
+        if sub_df['Avg Packet Loss Rate'].mean() > rules['packet_loss_threshold']:
+            issue_list.append({"Issue": "High Packet Loss", "Recommendation": rules['suggestions']['High Packet Loss']})
+
+        alert['HighlyAffectedSubnets'][subnet] = {
+            "UsersAffected": sub_df['Second UPN'].nunique(),
+            "MediaTypeAffected": sub_df['Media Type'].value_counts().to_dict(),
+            "ConnectionTypeAffected": sub_df['Second Network Connection Detail'].value_counts().to_dict(),
+            "VDI Types": sub_df['Second Client VDI Version'].value_counts().to_dict(),
+            "UPNs": sub_df['Second UPN'].unique().tolist(),
+            "Issues": issue_list
+        }
+
+    feedback_subnet_df = feedback_df[feedback_df['Second Subnet'].isin(ip_group['Second Subnet'])]
+    alert['FeedbackAnalysis']['UsersWithPoorFeedback'] = feedback_subnet_df['Second Subnet'].nunique()
+    alert['FeedbackAnalysis']['FeedbackTexts'] = feedback_subnet_df['Second Feedback Text'].dropna().unique().tolist()
+
+    for subnet_data in alert['HighlyAffectedSubnets'].values():
+        for issue in subnet_data['Issues']:
+            alert['Remediation'].append(issue['Recommendation'])
+
+    alert['Remediation'] = list(set(alert['Remediation']))
+    return alert
