@@ -146,34 +146,29 @@ for ($h = $startHour; $h -lt $endHour; $h++) {
 
     Write-Log -Level Info -Message "Processing hour $hourStr - $nextHourStr"
 
-    $bag = [System.Collections.Concurrent.ConcurrentBag[PSObject]]::new()
-    $parallelOpts = [System.Threading.Tasks.ParallelOptions]::new()
-    $parallelOpts.MaxDegreeOfParallelism = $config.Parallelism
-
-    [System.Threading.Tasks.Parallel]::ForEach(0..3, $parallelOpts, {
-        param($q)
+    $resultsList = @()
+    for ($q = 0; $q -lt 4; $q++) {
         $sliceStart = $baseDate.AddHours($h).AddMinutes($q * 15)
         $sliceEnd   = $sliceStart.AddMinutes(15)
         $filter     = "startDateTime ge $($sliceStart.ToString('s'))Z and startDateTime lt $($sliceEnd.ToString('s'))Z"
         $uri        = "https://graph.microsoft.com/v1.0/communications/callRecords?`$filter=$filter&`$select=id,lastModifiedDateTime,startDateTime,endDateTime,type"
-
         try {
             $batch = Invoke-GraphGetWithRetry -Uri $uri -AccessToken $token -MaxRetries $config.MaxRetries -RetryDelaySeconds $config.RetryDelaySeconds
-            foreach ($item in $batch) { $bag.Add($item) }
+            $resultsList += $batch
             Write-Log -Level Info -Message "Fetched slice $($sliceStart)"
         } catch {
             $err = [PSCustomObject]@{ SliceStart = $sliceStart; Error = $_.Exception.Message }
             $errors += $err
             Write-Log -Level Error -Message "Error at slice $($sliceStart): $($_.Exception.Message)"
         }
-    })
+    }
 
-    # Export
-    $results = $bag.ToArray() |
+    # Dedupe and export
+    $unique = $resultsList |
         Sort-Object id -Unique |
         Select-Object id, lastModifiedDateTime, startDateTime, endDateTime, type
-    $results | Export-Csv -Path $outfile -NoTypeInformation
-    Write-Log -Level Info -Message "Wrote $($results.Count) records to $outfile"
+    $unique | Export-Csv -Path $outfile -NoTypeInformation
+    Write-Log -Level Info -Message "Wrote $($unique.Count) records to $outfile"
 }
 
 # Error summary
