@@ -84,6 +84,17 @@ Power BI Dashboards & Reports
 
 ---
 
+## ✅ Threshold-Based Clustered Anomaly Alerts
+
+* Alerts are only generated for systemic issues affecting large groups.
+* Strict thresholds defined in `business_rules.json` must be met:
+
+  * Users Affected ≥ 100
+  * Subnets Affected ≥ 20
+* Uses clustering logic grouped by Second Reflexive Local IP Network.
+* Prevents noise from isolated or low-impact incidents.
+* Enhances accuracy and prioritization of IT response.
+
 ## 🚀 Scalability & Value to Organization
 
 * Config-driven thresholds (jitter, round trip, packet loss, feedback)
