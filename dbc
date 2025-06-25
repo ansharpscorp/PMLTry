@@ -1,0 +1,24 @@
+import json
+import urllib
+from sqlalchemy import create_engine
+
+def get_synapse_engine(config_path="config.json"):
+    # Load connection details
+    cfg = json.load(open(config_path))["synapse"]
+    # Build ODBC connection string with Active Directory Password authentication
+    params = {
+        "DRIVER": cfg["driver"],
+        "SERVER": cfg["server"],
+        "DATABASE": cfg["database"],
+        "UID": cfg["username"],
+        "PWD": cfg["password"],
+        "Authentication": "ActiveDirectoryPassword",
+        "Trusted_Connection": "yes",
+        "TrustServerCertificate": "no"
+    }
+    conn_str = ";".join(f"{k}={v}" for k, v in params.items())
+    # URL-encode the connection string
+    odbc_conn_str = urllib.parse.quote_plus(conn_str)
+    # Create SQLAlchemy engine using ODBC
+    engine = create_engine(f"mssql+pyodbc:///?odbc_connect={odbc_conn_str}")
+    return engine
