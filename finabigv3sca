@@ -1,0 +1,159 @@
+# Directory Structure:
+# project/
+# ├── config/
+# │   ├── business_rules.json
+# │   └── settings.json
+# ├── data/
+# │   └── alerts/
+# ├── models/
+# │   ├── isolation_forest.py
+# │   ├── xgboost_model.py
+# │   ├── prophet_forecast.py
+# │   └── model_utils.py
+# ├── utils/
+# │   ├── db_connect.py
+# │   ├── preprocess.py
+# │   ├── feature_engineering.py
+# │   ├── feedback_analysis.py
+# │   ├── alert_structure.py
+# │   ├── logger.py
+# ├── tests/
+# │   ├── test_preprocess.py
+# │   └── test_alert_structure.py
+# ├── run.sh
+# ├── README.md
+# └── main.py
+
+# File: config/business_rules.json
+{
+  "jitter_threshold": 30,
+  "round_trip_threshold": 300,
+  "packet_loss_threshold": 0.05,
+  "feedback_sentiment_threshold": 0.2,
+  "feedback_rating_threshold": 0,
+  "alert_user_count_threshold": 50,
+  "alert_subnet_count_threshold": 20,
+  "suggestions": {
+    "High Jitter": "Optimize WAN or check QoS settings.",
+    "High Round Trip": "Inspect WAN routing or investigate latency sources.",
+    "High Packet Loss": "Check network stability and packet routing.",
+    "Negative Feedback": "Review user feedback and investigate user-side issues."
+  }
+}
+
+# File: config/settings.json
+{
+  "sql_server": "tcp:<your-synapse-server>.sql.azuresynapse.net",
+  "database": "YourDatabaseName",
+  "username": "your_user@your_domain.com",
+  "password": "your_password",
+  "output_folder": "data/alerts"
+}
+
+# File: models/model_utils.py
+import joblib
+
+def save_model(model, path):
+    joblib.dump(model, path)
+
+def load_model(path):
+    return joblib.load(path)
+
+# File: utils/logger.py
+import logging
+import os
+
+def setup_logger(name='alert_logger', log_file='logs/app.log', level=logging.INFO):
+    os.makedirs(os.path.dirname(log_file), exist_ok=True)
+    formatter = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
+    handler = logging.FileHandler(log_file)
+    handler.setFormatter(formatter)
+    logger = logging.getLogger(name)
+    logger.setLevel(level)
+    if not logger.handlers:
+        logger.addHandler(handler)
+    return logger
+
+# File: tests/test_preprocess.py
+import pandas as pd
+from utils.preprocess import preprocess_data
+
+def test_preprocess():
+    df = pd.DataFrame({"Total Stream Count": [None], "First Network Connection Detail": ["Mobile"]})
+    processed = preprocess_data(df)
+    assert processed['Total Stream Count'].iloc[0] == 0
+    assert pd.isna(processed['First Network Connection Detail'].iloc[0])
+
+# File: tests/test_alert_structure.py
+import pandas as pd
+from utils.alert_structure import build_alert_structure
+
+sample_data = {
+    "Date": ["2025-06-25"],
+    "Second Reflexive Local IP Network": ["10.0.0.1"],
+    "Second UPN": ["user@example.com"],
+    "Media Type": ["Audio"],
+    "Second Network Connection Detail": ["Wired"],
+    "Second Client VDI Version": ["VDI 1.0"],
+    "Second Subnet": ["10.0.0.0/24"],
+    "Avg Jitter": [50],
+    "Avg Round Trip": [400],
+    "Avg Packet Loss Rate": [0.1],
+    "Second Capture Dev Name": ["Logitech USB Mic"],
+    "Second Render Dev Name": ["Generic Speaker"],
+    "ClassifiedPoorCall": [True],
+    "Second Feedback Rating Poor Count": [1],
+    "Second Feedback Text": ["Audio issue"]
+}
+
+def test_alert():
+    df = pd.DataFrame(sample_data)
+    rules = {
+        "jitter_threshold": 30,
+        "round_trip_threshold": 300,
+        "packet_loss_threshold": 0.05,
+        "suggestions": {
+            "High Jitter": "Fix jitter.",
+            "High Round Trip": "Fix RTT.",
+            "High Packet Loss": "Fix packet loss."
+        }
+    }
+    alert = build_alert_structure(df, df, rules)
+    assert alert['ReflexiveIP'] == "10.0.0.1"
+    assert alert['AnomalyCount'] == 1
+
+# File: run.sh
+#!/bin/bash
+python main.py --start_date $1 --end_date $2
+
+# File: README.md
+# Teams Call Quality Anomaly Detection
+
+## Overview
+This project analyzes Teams call quality data using Isolation Forest, XGBoost, and Prophet. It generates nested JSON alerts grouped by Second Reflexive Local IP Network.
+
+## Structure
+- `config/`: Configuration files
+- `utils/`: Utility functions
+- `models/`: ML models
+- `data/alerts/`: Output alerts
+- `main.py`: Orchestrator
+
+## Usage
+```bash
+bash run.sh 2025-06-01 2025-06-25
+```
+
+## Dependencies
+Install with:
+```bash
+pip install -r requirements.txt
+```
+
+---
+
+All remaining scripts (`main.py`, `xgboost_model.py`, `prophet_forecast.py`, etc.) are unchanged from prior canvas updates and include:
+- Anomaly detection
+- Alert generation
+- Forecasting
+- Modular and testable code
