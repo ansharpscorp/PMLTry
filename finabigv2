@@ -1,0 +1,236 @@
+# Directory Structure:
+# project/
+# ├── config/
+# │   ├── business_rules.json
+# │   └── settings.json
+# ├── data/
+# │   └── alerts/
+# ├── models/
+# │   ├── isolation_forest.py
+# │   ├── xgboost_model.py
+# │   └── prophet_forecast.py
+# ├── utils/
+# │   ├── db_connect.py
+# │   ├── preprocess.py
+# │   ├── feature_engineering.py
+# │   ├── feedback_analysis.py
+# │   └── alert_structure.py
+# └── main.py
+
+# File: config/business_rules.json
+{
+  "jitter_threshold": 30,
+  "round_trip_threshold": 300,
+  "packet_loss_threshold": 0.05,
+  "feedback_sentiment_threshold": 0.2,
+  "feedback_rating_threshold": 0,
+  "alert_user_count_threshold": 50,
+  "alert_subnet_count_threshold": 20,
+  "suggestions": {
+    "High Jitter": "Optimize WAN or check QoS settings.",
+    "High Round Trip": "Inspect WAN routing or investigate latency sources.",
+    "High Packet Loss": "Check network stability and packet routing.",
+    "Negative Feedback": "Review user feedback and investigate user-side issues."
+  }
+}
+
+# File: config/settings.json
+{
+  "sql_server": "tcp:<your-synapse-server>.sql.azuresynapse.net",
+  "database": "YourDatabaseName",
+  "username": "your_user@your_domain.com",
+  "password": "your_password",
+  "output_folder": "data/alerts"
+}
+
+# File: utils/db_connect.py
+import pandas as pd
+import pyodbc
+
+def get_data_from_synapse(server, database, username, password, query):
+    conn_str = (
+        f"DRIVER={{ODBC Driver 17 for SQL Server}};"
+        f"SERVER={server};"
+        f"DATABASE={database};"
+        f"UID={username};"
+        f"PWD={password}"
+    )
+    with pyodbc.connect(conn_str) as conn:
+        return pd.read_sql(query, conn)
+
+# File: utils/preprocess.py
+import pandas as pd
+
+def preprocess_data(df):
+    cols_to_zero = [
+        "Total Stream Count", "Audio Stream Count", "Audio Poor Stream Count",
+        "Video Stream Count", "Video Poor Stream Count",
+        "Total CDR Available Stream Count", "Total Call Setup Failed Stream Count",
+        "Total Call Setup Succeeded Stream Count", "Total Call Dropped Stream Count",
+        "Total Media Failed Stream Count", "Avg Jitter", "Avg Jitter Max",
+        "Avg Round Trip", "Avg Round Trip Max", "Avg Packet Loss Rate",
+        "Avg Packet Loss Rate Max", "Avg Overall Avg Network MOS",
+        "Avg Packet Utilization"
+    ]
+    df[cols_to_zero] = df[cols_to_zero].fillna(0)
+
+    for col in ["First Network Connection Detail", "Second Network Connection Detail"]:
+        df[col] = df[col].where(df[col].isin(["Wired", "Wifi"]))
+
+    cond = ((df['Audio Poor Stream Count'] == 1) | (df['Video Stream Count'] == 1)) & (df['ClassifiedPoorCall'].isna())
+    df.loc[cond, 'ClassifiedPoorCall'] = True
+
+    return df
+
+# File: utils/feature_engineering.py
+
+def add_features(df):
+    df['Audio Poor %'] = df['Audio Poor Stream Count'] / df['Audio Stream Count'].replace(0, 1)
+    df['Video Poor %'] = df['Video Poor Stream Count'] / df['Video Stream Count'].replace(0, 1)
+    df['Call Dropped %'] = df['Total Call Dropped Stream Count'] / df['Total Stream Count'].replace(0, 1)
+    df['Setup Failure %'] = df['Total Call Setup Failed Stream Count'] / df['Total Stream Count'].replace(0, 1)
+
+    df['Second Client VDI Version'] = df['Second Client VDI Mode'].map(
+        lambda x: 'VDI 1.0' if str(x).startswith(('11', '21')) else 'VDI 2.0' if str(x).startswith(('12', '22')) else 'Unknown')
+
+    for ip_col, subnet_col in [("First IP Address", "First Subnet"), ("Second IP Address", "Second Subnet")]:
+        df[subnet_col] = df[subnet_col].fillna(
+            df[ip_col].where(df[ip_col].str.contains("\\."), other="Unknown")
+            .str.extract(r'(\\d+\\.\\d+\\.\\d+)')[0] + ".0/24"
+        )
+
+    return df
+
+# File: utils/feedback_analysis.py
+
+def analyze_feedback(df):
+    feedback_df = df[(df['Second Feedback Rating Poor Count'] > 0) & df['Second Feedback Text'].notna()][
+        ['Second Subnet', 'Second Feedback Text']]
+    return feedback_df
+
+# File: models/isolation_forest.py
+from sklearn.ensemble import IsolationForest
+
+def detect_anomalies(df, features):
+    model = IsolationForest(contamination=0.05, random_state=42)
+    df['anomaly'] = model.fit_predict(df[features])
+    return df[df['anomaly'] == -1]
+
+# File: models/prophet_forecast.py
+from prophet import Prophet
+
+def forecast_anomalies(df, date_col, metric_col):
+    forecast_df = df.groupby(date_col)[metric_col].mean().reset_index()
+    forecast_df.columns = ['ds', 'y']
+    m = Prophet()
+    m.fit(forecast_df)
+    future = m.make_future_dataframe(periods=7)
+    forecast = m.predict(future)
+    return forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].tail(7)
+
+# File: utils/alert_structure.py
+from collections import defaultdict
+
+def build_alert_structure(ip_group, feedback_df, rules):
+    # Filter rows with high anomalies
+    poor_device_df = ip_group[
+        (ip_group['ClassifiedPoorCall'] == True) |
+        (ip_group['Avg Jitter'] > rules['jitter_threshold']) |
+        (ip_group['Avg Packet Loss Rate'] > rules['packet_loss_threshold']) |
+        (ip_group['Second Feedback Rating Poor Count'] > 0)
+    ]
+
+    alert = {
+        "ReflexiveIP": ip_group['Second Reflexive Local IP Network'].iloc[0],
+        "AnomalyCount": len(ip_group),
+        "DatesAffected": sorted(ip_group['Date'].astype(str).unique().tolist()),
+        "UsersAffected": ip_group['Second UPN'].nunique(),
+        "MediaTypeAffected": ip_group['Media Type'].value_counts().to_dict(),
+        "ConnectionTypeAffected": ip_group['Second Network Connection Detail'].value_counts().to_dict(),
+        "VDI Versions": ip_group['Second Client VDI Version'].value_counts().to_dict(),
+        "MostUsedCaptureDevices": poor_device_df['Second Capture Dev Name'].value_counts().head(5).index.tolist(),
+        "MostUsedRenderDevices": poor_device_df['Second Render Dev Name'].value_counts().head(5).index.tolist(),
+        "HighlyAffectedSubnets": {},
+        "FeedbackAnalysis": {
+            "UsersWithPoorFeedback": 0,
+            "FeedbackTexts": []
+        },
+        "Remediation": []
+    }
+
+    for subnet, sub_df in ip_group.groupby('Second Subnet'):
+        issue_list = []
+        if sub_df['Avg Jitter'].mean() > rules['jitter_threshold']:
+            issue_list.append({"Issue": "High Jitter", "Recommendation": rules['suggestions']['High Jitter']})
+        if sub_df['Avg Round Trip'].mean() > rules['round_trip_threshold']:
+            issue_list.append({"Issue": "High Round Trip", "Recommendation": rules['suggestions']['High Round Trip']})
+        if sub_df['Avg Packet Loss Rate'].mean() > rules['packet_loss_threshold']:
+            issue_list.append({"Issue": "High Packet Loss", "Recommendation": rules['suggestions']['High Packet Loss']})
+
+        alert['HighlyAffectedSubnets'][subnet] = {
+            "UsersAffected": sub_df['Second UPN'].nunique(),
+            "MediaTypeAffected": sub_df['Media Type'].value_counts().to_dict(),
+            "ConnectionTypeAffected": sub_df['Second Network Connection Detail'].value_counts().to_dict(),
+            "VDI Types": sub_df['Second Client VDI Version'].value_counts().to_dict(),
+            "UPNs": sub_df['Second UPN'].unique().tolist(),
+            "Issues": issue_list
+        }
+
+    feedback_subnet_df = feedback_df[feedback_df['Second Subnet'].isin(ip_group['Second Subnet'])]
+    alert['FeedbackAnalysis']['UsersWithPoorFeedback'] = feedback_subnet_df['Second Subnet'].nunique()
+    alert['FeedbackAnalysis']['FeedbackTexts'] = feedback_subnet_df['Second Feedback Text'].dropna().unique().tolist()
+
+    for subnet_data in alert['HighlyAffectedSubnets'].values():
+        for issue in subnet_data['Issues']:
+            alert['Remediation'].append(issue['Recommendation'])
+
+    alert['Remediation'] = list(set(alert['Remediation']))
+    return alert
+
+# File: main.py
+import json
+import pandas as pd
+from utils.db_connect import get_data_from_synapse
+from utils.preprocess import preprocess_data
+from utils.feature_engineering import add_features
+from utils.feedback_analysis import analyze_feedback
+from models.isolation_forest import detect_anomalies
+from models.prophet_forecast import forecast_anomalies
+from utils.alert_structure import build_alert_structure
+import os
+from datetime import datetime
+import argparse
+
+with open('config/business_rules.json') as f:
+    rules = json.load(f)
+with open('config/settings.json') as f:
+    settings = json.load(f)
+
+parser = argparse.ArgumentParser()
+parser.add_argument('--start_date', type=str)
+parser.add_argument('--end_date', type=str)
+args = parser.parse_args()
+
+start_date = pd.to_datetime(args.start_date) if args.start_date else pd.Timestamp.now().normalize()
+end_date = pd.to_datetime(args.end_date) if args.end_date else start_date
+
+for current_date in pd.date_range(start=start_date, end=end_date):
+    query = f"SELECT * FROM TeamsCallQualityTable WHERE CAST(Date AS DATE) = '{current_date.strftime('%Y-%m-%d')}'"
+    df = get_data_from_synapse(settings['sql_server'], settings['database'], settings['username'], settings['password'], query)
+    if df.empty:
+        continue
+
+    df = preprocess_data(df)
+    df = add_features(df)
+    anomalies = detect_anomalies(df, ['Avg Jitter', 'Avg Round Trip', 'Avg Packet Loss Rate'])
+    feedback = analyze_feedback(df)
+
+    alerts = []
+    for reflexive_ip, group in anomalies.groupby('Second Reflexive Local IP Network'):
+        alerts.append(build_alert_structure(group, feedback, rules))
+
+    os.makedirs(settings['output_folder'], exist_ok=True)
+    with open(os.path.join(settings['output_folder'], f"alert_{current_date.strftime('%Y%m%d')}.json"), 'w') as f:
+        json.dump(alerts, f, indent=4)
+
+    print(f"Saved alert for {current_date.strftime('%Y-%m-%d')}")
