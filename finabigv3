@@ -1,0 +1,318 @@
+# config/business_rules.json
+{
+  "jitter_threshold": 30,
+  "round_trip_threshold": 300,
+  "packet_loss_threshold": 0.05,
+  "feedback_sentiment_threshold": 0.2,
+  "feedback_rating_threshold": 0,
+  "alert_user_count_threshold": 100,
+  "alert_subnet_count_threshold": 20,
+  "suggestions": {
+    "High Jitter": "Optimize WAN or check QoS settings.",
+    "High Round Trip": "Inspect WAN routing or investigate latency sources.",
+    "High Packet Loss": "Check network stability and packet routing.",
+    "Negative Feedback": "Review user feedback and investigate user-side issues."
+  }
+}
+
+# config/settings.json
+{
+  "sql_server": "your-synapse-server.database.windows.net",
+  "sql_database": "TeamsCallData",
+  "sql_user": "your_user",
+  "sql_password": "your_password",
+  "output_folder": "data/alerts"
+}
+
+# main.py
+import argparse
+from utils import db_connect, preprocess, feature_engineering, feedback_analysis, alert_structure
+from models import isolation_forest, xgboost_model, prophet_forecast
+import json
+import os
+import pandas as pd
+
+def main(start_date, end_date):
+    config = db_connect.load_config()
+    rules = db_connect.load_rules()
+
+    df = db_connect.load_data(config, start_date, end_date)
+    df_clean = preprocess.clean_data(df)
+    df_features = feature_engineering.add_features(df_clean, rules)
+
+    anomaly_df = isolation_forest.detect_anomalies(df_features)
+    xgb_preds = xgboost_model.predict(df_features)
+    forecasts = prophet_forecast.forecast(df_features)
+
+    feedback_results = feedback_analysis.analyze(df_features)
+    alerts = alert_structure.build_alert_structure(df_features, anomaly_df, xgb_preds, forecasts, feedback_results, rules)
+    filtered_alerts = alert_structure.filter_alerts(alerts, rules)
+
+    os.makedirs(config["output_folder"], exist_ok=True)
+    for alert in filtered_alerts:
+        fname = f"alerts_{alert['ReflexiveIP'].replace('.', '_')}.json"
+        with open(os.path.join(config["output_folder"], fname), "w") as f:
+            json.dump(alert, f, indent=2)
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--start_date", required=True)
+    parser.add_argument("--end_date", required=True)
+    args = parser.parse_args()
+    main(args.start_date, args.end_date)
+
+# requirements.txt
+pandas
+scikit-learn
+xgboost
+prophet
+pyodbc
+python-pptx
+openpyxl
+
+# README.md
+# Teams Call Quality Anomaly Detection
+Run main.py with `--start_date` and `--end_date`.
+Check `config/` for configuration and thresholds.
+
+# run.sh
+#!/bin/bash
+python3 main.py --start_date "$1" --end_date "$2"
+
+# utils/db_connect.py
+import json
+import pyodbc
+import pandas as pd
+
+def load_config():
+    with open("config/settings.json") as f:
+        return json.load(f)
+
+def load_rules():
+    with open("config/business_rules.json") as f:
+        return json.load(f)
+
+def load_data(config, start_date, end_date):
+    conn_str = (
+        f"Driver={{ODBC Driver 17 for SQL Server}};"
+        f"Server={config['sql_server']};"
+        f"Database={config['sql_database']};"
+        f"UID={config['sql_user']};"
+        f"PWD={config['sql_password']};"
+    )
+    query = f"""
+        SELECT * FROM CallRecords
+        WHERE Date BETWEEN '{start_date}' AND '{end_date}'
+    """
+    conn = pyodbc.connect(conn_str)
+    return pd.read_sql(query, conn)
+
+# utils/preprocess.py
+import pandas as pd
+
+def clean_data(df):
+    numeric_fill = [
+        "Total Stream Count", "Audio Stream Count", "Audio Poor Stream Count",
+        "Video Stream Count", "Video Poor Stream Count", "Total CDR Available Stream Count",
+        "Total Call Setup Failed Stream Count", "Total Call Setup Succeeded Stream Count",
+        "Total Call Dropped Stream Count", "Total Media Failed Stream Count",
+        "Avg Jitter", "Avg Jitter Max", "Avg Round Trip", "Avg Round Trip Max",
+        "Avg Packet Loss Rate", "Avg Packet Loss Rate Max", "Avg Overall Avg Network MOS",
+        "Avg Packet Utilization"
+    ]
+    for col in numeric_fill:
+        df[col] = df[col].fillna(0)
+
+    for col in ["First Network Connection Detail", "Second Network Connection Detail"]:
+        df[col] = df[col].where(df[col].isin(["Wired", "Wifi"]), None)
+
+    cond = ((df["Audio Poor Stream Count"] == 1) | (df["Video Stream Count"] == 1)) & (df["ClassifiedPoorCall"].isna())
+    df.loc[cond, "ClassifiedPoorCall"] = True
+
+    return df
+
+# utils/feature_engineering.py
+import pandas as pd
+
+def add_features(df, rules):
+    df["Audio Poor %"] = df["Audio Poor Stream Count"] / df["Audio Stream Count"].replace(0, 1)
+    df["Video Poor %"] = df["Video Poor Stream Count"] / df["Video Stream Count"].replace(0, 1)
+    df["Call Dropped %"] = df["Total Call Dropped Stream Count"] / df["Total Stream Count"].replace(0, 1)
+    df["Setup Failure %"] = df["Total Call Setup Failed Stream Count"] / (
+        df["Total Call Setup Failed Stream Count"] + df["Total Call Setup Succeeded Stream Count"].replace(0, 1))
+    return df
+
+# utils/feedback_analysis.py
+def analyze(df):
+    poor_feedback = df[df["Second Feedback Rating Poor Count"] > 0]
+    return {
+        "UsersWithPoorFeedback": poor_feedback["Second UPN"].nunique(),
+        "FeedbackTexts": poor_feedback["Second Feedback Text"].dropna().tolist()
+    }
+
+# utils/alert_structure.py
+def build_alert_structure(df, anomaly_df, xgb_preds, forecasts, feedback, rules):
+    df["UniqueParticipant"] = df["Second UPN"].fillna("") + df["Second Phone Number"].fillna("")
+    alerts = []
+    for reflexive_ip, group in df.groupby("Second Reflexive Local IP Network"):
+        if not reflexive_ip:
+            continue
+        users = group["Second UPN"].nunique()
+        subnets = group["Second Subnet"].nunique()
+
+        if users < rules["alert_user_count_threshold"] or subnets < rules["alert_subnet_count_threshold"]:
+            continue
+
+        most_used_devices = group["Second Capture Dev"].value_counts().head(3).to_dict()
+        large_conferences = group.groupby("Conference Id")["UniqueParticipant"].nunique()
+        large_conf_count = large_conferences[large_conferences > 100].count()
+
+        alert = {
+            "ReflexiveIP": reflexive_ip,
+            "AnomalyCount": len(anomaly_df[anomaly_df["Second Reflexive Local IP Network"] == reflexive_ip]),
+            "DatesAffected": sorted(group["Date"].unique().tolist()),
+            "UsersAffected": users,
+            "MediaTypeAffected": group["Media Type"].value_counts().to_dict(),
+            "ConnectionTypeAffected": group["Second Network Connection Detail"].value_counts().to_dict(),
+            "HighlyAffectedSubnets": {},
+            "MostAffectedCaptureDevices": group[group["ClassifiedPoorCall"] == True]["Second Capture Dev"].value_counts().head(3).to_dict(),
+            "MostAffectedRenderDevices": group[group["ClassifiedPoorCall"] == True]["Second Render Dev"].value_counts().head(3).to_dict(),
+            "ConferencesWith>100Participants": large_conf_count,
+            "FeedbackAnalysis": feedback,
+            "Remediation": []
+        }
+
+        for subnet, sub_group in group.groupby("Second Subnet"):
+            if not subnet:
+                continue
+            upns = sub_group["Second UPN"].dropna().unique().tolist()
+            subnet_alert = {
+                "UsersAffected": sub_group["Second UPN"].nunique(),
+                "MediaTypeAffected": sub_group["Media Type"].value_counts().to_dict(),
+                "ConnectionTypeAffected": sub_group["Second Network Connection Detail"].value_counts().to_dict(),
+                "VDI Types": sub_group["Second Client VDI Mode"].map(lambda x: "VDI 2.0" if str(x).startswith("21") or str(x).startswith("22") else "VDI 1.0").value_counts().to_dict(),
+                "UPNs": upns,
+                "Issues": []
+            }
+
+            if (sub_group["Avg Jitter Max"] - sub_group["Avg Jitter"]).mean() > rules["jitter_threshold"]:
+                subnet_alert["Issues"].append({"Issue": "High Jitter", "Recommendation": rules["suggestions"]["High Jitter"]})
+            if (sub_group["Avg Round Trip Max"] - sub_group["Avg Round Trip"]).mean() > rules["round_trip_threshold"]:
+                subnet_alert["Issues"].append({"Issue": "High Round Trip", "Recommendation": rules["suggestions"]["High Round Trip"]})
+            if (sub_group["Avg Packet Loss Rate Max"] - sub_group["Avg Packet Loss Rate"]).mean() > rules["packet_loss_threshold"]:
+                subnet_alert["Issues"].append({"Issue": "High Packet Loss", "Recommendation": rules["suggestions"]["High Packet Loss"]})
+
+            alert["HighlyAffectedSubnets"][subnet] = subnet_alert
+
+        if users >= rules["alert_user_count_threshold"] and subnets >= rules["alert_subnet_count_threshold"]:
+            alerts.append(alert)
+    return alerts
+
+def filter_alerts(alerts, rules):
+    # Additional validation if needed can be added here
+    return [a for a in alerts if a["UsersAffected"] >= rules["alert_user_count_threshold"] and len(a["HighlyAffectedSubnets"]) >= rules["alert_subnet_count_threshold"]]
+
+# models/isolation_forest.py
+from sklearn.ensemble import IsolationForest
+
+def detect_anomalies(df):
+    model = IsolationForest(contamination=0.05)
+    features = df[["Avg Jitter", "Avg Round Trip", "Avg Packet Loss Rate"]].fillna(0)
+    df["is_anomaly"] = model.fit_predict(features)
+    return df[df["is_anomaly"] == -1]
+
+# models/xgboost_model.py
+from xgboost import XGBClassifier
+import joblib
+import os
+
+def predict(df):
+    model_path = os.path.join("models", "xgb_model.joblib")
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(f"Trained model not found at {model_path}")
+    model = joblib.load(model_path)
+    feature_cols = ["Avg Jitter", "Avg Round Trip", "Avg Packet Loss Rate"]
+    df["xgb_pred"] = model.predict(df[feature_cols].fillna(0))
+    return df
+
+# models/prophet_forecast.py
+from prophet import Prophet
+import pandas as pd
+import matplotlib.pyplot as plt
+import os
+
+def forecast(df):
+    forecasts = []
+    if "Date" not in df.columns:
+                    # Optional: Save forecast plot
+            try:
+                fig = model.plot(forecast_df)
+                os.makedirs("output/forecasts", exist_ok=True)
+                fig.savefig(f"output/forecasts/{subnet.replace('/', '_')}_forecast.png")
+            except:
+                pass
+
+        return forecasts
+    for subnet, group in df.groupby("Second Subnet"):
+        if len(group) < 10:
+            continue
+        ts = group.groupby("Date")["Avg Jitter"].mean().reset_index()
+        ts.columns = ["ds", "y"]
+        try:
+            model = Prophet()
+            model.fit(ts)
+            future = model.make_future_dataframe(periods=7)
+            forecast_df = model.predict(future)
+            forecasts.append({"subnet": subnet, "forecast": forecast_df[["ds", "yhat"]].to_dict(orient="records")})
+        except Exception as e:
+            continue
+    return forecasts
+
+# models/model_utils.py
+import pandas as pd
+import joblib
+from xgboost import XGBClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report, accuracy_score
+
+def train_xgboost_model(df, model_path="models/xgb_model.joblib"):
+    features = ["Avg Jitter", "Avg Round Trip", "Avg Packet Loss Rate"]
+    target = "ClassifiedPoorCall"
+
+    df = df.dropna(subset=features + [target])
+    X = df[features]
+    y = df[target].astype(int)
+
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    model = XGBClassifier(use_label_encoder=False, eval_metric='logloss')
+    model.fit(X_train, y_train)
+
+    y_pred = model.predict(X_test)
+    print("Accuracy:", accuracy_score(y_test, y_pred))
+    print("Classification Report:
+", classification_report(y_test, y_pred))
+
+    joblib.dump(model, model_path)
+    print(f"Model saved to {model_path}")
+
+# utils/logger.py
+import logging
+import os
+
+def setup_logger(name="app_logger", log_file="logs/app.log"):
+    os.makedirs(os.path.dirname(log_file), exist_ok=True)
+    logger = logging.getLogger(name)
+    logger.setLevel(logging.INFO)
+
+    fh = logging.FileHandler(log_file)
+    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    fh.setFormatter(formatter)
+    logger.addHandler(fh)
+    return logger
+
+# tests/test_preprocess.py
+# Placeholder for testing preprocess logic
+
+# tests/test_alert_structure.py
+# Placeholder for testing alert structure
+
