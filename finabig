@@ -1,0 +1,143 @@
+# Directory Structure:
+# project/
+# ├── config/
+# │   ├── business_rules.json
+# │   └── settings.json
+# ├── data/
+# │   └── alerts/
+# ├── models/
+# │   ├── isolation_forest.py
+# │   ├── xgboost_model.py
+# │   └── prophet_forecast.py
+# ├── utils/
+# │   ├── db_connect.py
+# │   ├── preprocess.py
+# │   ├── feature_engineering.py
+# │   ├── feedback_analysis.py
+# │   └── alert_structure.py
+# └── main.py
+
+# File: config/business_rules.json
+{
+  "jitter_threshold": 30,
+  "round_trip_threshold": 300,
+  "packet_loss_threshold": 0.05,
+  "feedback_sentiment_threshold": 0.2,
+  "feedback_rating_threshold": 0,
+  "alert_user_count_threshold": 50,
+  "alert_subnet_count_threshold": 20,
+  "suggestions": {
+    "High Jitter": "Optimize WAN or check QoS settings.",
+    "High Round Trip": "Inspect WAN routing or investigate latency sources.",
+    "High Packet Loss": "Check network stability and packet routing.",
+    "Negative Feedback": "Review user feedback and investigate user-side issues."
+  }
+}
+
+# File: utils/alert_structure.py
+from collections import defaultdict
+import pandas as pd
+
+def build_alert_structure(ip_group, feedback_df, rules):
+    alert = {
+        "ReflexiveIP": ip_group['Second Reflexive Local IP Network'].iloc[0],
+        "AnomalyCount": len(ip_group),
+        "DatesAffected": sorted(ip_group['Date'].astype(str).unique().tolist()),
+        "UsersAffected": ip_group['Second UPN'].nunique(),
+        "MediaTypeAffected": ip_group['Media Type'].value_counts().to_dict(),
+        "ConnectionTypeAffected": ip_group['Second Network Connection Detail'].value_counts().to_dict(),
+        "VDI Versions": ip_group['Second Client VDI Version'].value_counts().to_dict(),
+        "MostUsedCaptureDevices": ip_group['Second Capture Dev Name'].value_counts().head(5).index.tolist(),
+        "MostUsedRenderDevices": ip_group['Second Render Dev Name'].value_counts().head(5).index.tolist(),
+        "HighlyAffectedSubnets": {},
+        "FeedbackAnalysis": {
+            "UsersWithPoorFeedback": 0,
+            "FeedbackTexts": []
+        },
+        "Remediation": []
+    }
+
+    subnet_groups = ip_group.groupby('Second Subnet')
+    for subnet, sub_df in subnet_groups:
+        issue_list = []
+        if sub_df['Avg Jitter'].mean() > rules['jitter_threshold']:
+            issue_list.append({"Issue": "High Jitter", "Recommendation": rules['suggestions']['High Jitter']})
+        if sub_df['Avg Round Trip'].mean() > rules['round_trip_threshold']:
+            issue_list.append({"Issue": "High Round Trip", "Recommendation": rules['suggestions']['High Round Trip']})
+        if sub_df['Avg Packet Loss Rate'].mean() > rules['packet_loss_threshold']:
+            issue_list.append({"Issue": "High Packet Loss", "Recommendation": rules['suggestions']['High Packet Loss']})
+
+        alert['HighlyAffectedSubnets'][subnet] = {
+            "UsersAffected": sub_df['Second UPN'].nunique(),
+            "MediaTypeAffected": sub_df['Media Type'].value_counts().to_dict(),
+            "ConnectionTypeAffected": sub_df['Second Network Connection Detail'].value_counts().to_dict(),
+            "VDI Types": sub_df['Second Client VDI Version'].value_counts().to_dict(),
+            "UPNs": sub_df['Second UPN'].unique().tolist(),
+            "Issues": issue_list
+        }
+
+    feedback_subnet_df = feedback_df[feedback_df['Second Subnet'].isin(ip_group['Second Subnet'])]
+    alert['FeedbackAnalysis']['UsersWithPoorFeedback'] = feedback_subnet_df['Second Subnet'].nunique()
+    alert['FeedbackAnalysis']['FeedbackTexts'] = feedback_subnet_df['Second Feedback Text'].dropna().unique().tolist()
+
+    for subnet_data in alert['HighlyAffectedSubnets'].values():
+        for issue in subnet_data['Issues']:
+            alert['Remediation'].append(issue['Recommendation'])
+
+    alert['Remediation'] = list(set(alert['Remediation']))
+    return alert
+
+# File: main.py
+import json
+import pandas as pd
+from utils.db_connect import get_data_from_synapse
+from utils.preprocess import preprocess_data
+from utils.feature_engineering import add_features
+from utils.feedback_analysis import analyze_feedback
+from models.isolation_forest import detect_anomalies
+from models.prophet_forecast import forecast_anomalies
+from utils.alert_structure import build_alert_structure
+import os
+from datetime import datetime
+import argparse
+
+# Load config
+with open('config/business_rules.json') as f:
+    rules = json.load(f)
+with open('config/settings.json') as f:
+    settings = json.load(f)
+
+# CLI Arguments
+parser = argparse.ArgumentParser()
+parser.add_argument('--start_date', type=str, help='Start date in YYYY-MM-DD')
+parser.add_argument('--end_date', type=str, help='End date in YYYY-MM-DD')
+args = parser.parse_args()
+
+start_date = pd.to_datetime(args.start_date) if args.start_date else pd.Timestamp.now().normalize()
+end_date = pd.to_datetime(args.end_date) if args.end_date else start_date
+
+# Loop through date range
+for current_date in pd.date_range(start=start_date, end=end_date):
+    query = f"SELECT * FROM TeamsCallQualityTable WHERE CAST(Date AS DATE) = '{current_date.strftime('%Y-%m-%d')}'"
+    df = get_data_from_synapse(
+        settings['sql_server'], settings['database'], settings['username'], settings['password'], query
+    )
+    if df.empty:
+        continue
+
+    df = preprocess_data(df)
+    df = add_features(df)
+    anomalies = detect_anomalies(df, ['Avg Jitter', 'Avg Round Trip', 'Avg Packet Loss Rate'])
+    feedback = analyze_feedback(df)
+
+    alerts = []
+    for reflexive_ip, group in anomalies.groupby('Second Reflexive Local IP Network'):
+        alert = build_alert_structure(group, feedback, rules)
+        alerts.append(alert)
+
+    output_file = os.path.join(settings['output_folder'], f"alert_{current_date.strftime('%Y%m%d')}.json")
+    os.makedirs(settings['output_folder'], exist_ok=True)
+    with open(output_file, 'w') as f:
+        json.dump(alerts, f, indent=4)
+
+    print(f"Alert generated: {output_file}")
