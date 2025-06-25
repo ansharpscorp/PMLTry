@@ -1,0 +1,181 @@
+# -------------------------
+# File: config.json
+# -------------------------
+{
+    "TenantId": "<your-tenant-id>",
+    "ClientId": "<your-client-id>",
+    "ClientSecret": "<your-client-secret>",
+    "GraphHelperModulePath": "./GraphHelperModule.psm1",
+    "LoggerModulePath": "./LoggerModule.psm1",
+    "OutputFolder": "./Output",
+    "Parallelism": 4,
+    "MaxRetries": 5,
+    "RetryDelaySeconds": 5
+}
+
+# -------------------------
+# File: GraphHelperModule.psm1
+# -------------------------
+function Get-GraphAuthToken {
+    param (
+        [Parameter(Mandatory)][string] $TenantId,
+        [Parameter(Mandatory)][string] $ClientId,
+        [Parameter(Mandatory)][string] $ClientSecret,
+        [string] $Scope = "https://graph.microsoft.com/.default"
+    )
+    $body = @{ grant_type = 'client_credentials'; client_id = $ClientId; client_secret = $ClientSecret; scope = $Scope }
+    $response = Invoke-RestMethod -Method Post -Uri "https://login.microsoftonline.com/$TenantId/oauth2/v2.0/token" -Body $body -ErrorAction Stop
+    return $response.access_token
+}
+
+function Invoke-GraphGet {
+    param (
+        [Parameter(Mandatory)][string] $Uri,
+        [Parameter(Mandatory)][string] $AccessToken
+    )
+    $headers = @{ Authorization = "Bearer $AccessToken" }
+    $all = @()
+    do {
+        $resp = Invoke-RestMethod -Method Get -Uri $Uri -Headers $headers -ErrorAction Stop
+        $all += $resp.value
+        $Uri = $resp.'@odata.nextLink'
+    } while ($Uri)
+    return $all
+}
+
+function Invoke-GraphGetWithRetry {
+    param (
+        [Parameter(Mandatory)][string] $Uri,
+        [Parameter(Mandatory)][string] $AccessToken,
+        [Parameter(Mandatory)][int]    $MaxRetries,
+        [Parameter(Mandatory)][int]    $RetryDelaySeconds
+    )
+    $attempt = 0
+    while ($true) {
+        try {
+            return Invoke-GraphGet -Uri $Uri -AccessToken $AccessToken
+        } catch {
+            $status = $_.Exception.Response.StatusCode.Value__
+            if (($status -eq 429) -or ($status -eq 503)) {
+                if ($attempt -ge $MaxRetries) { throw }
+                $delay = $RetryDelaySeconds * [math]::Pow(2, $attempt)
+                Write-Log -Level Warn -Message "HTTP $status, retrying in $delay sec (attempt $($attempt+1)/$MaxRetries)"
+                Start-Sleep -Seconds $delay
+                $attempt++
+            } else {
+                Write-Log -Level Error -Message "Graph API call failed with status $status: $_"
+                throw
+            }
+        }
+    }
+}
+
+Export-ModuleMember -Function Get-GraphAuthToken, Invoke-GraphGet, Invoke-GraphGetWithRetry
+
+# -------------------------
+# File: LoggerModule.psm1
+# -------------------------
+function Initialize-Logger {
+    param ([string] $LogFolder)
+    if (!(Test-Path $LogFolder)) { New-Item -Path $LogFolder -ItemType Directory | Out-Null }
+    $global:LogFile = Join-Path $LogFolder "$(Get-Date -Format 'yyyyMMdd_HHmmss')_ConferenceId.log"
+    "Log initialized at $(Get-Date -Format u)" | Out-File -FilePath $global:LogFile
+}
+
+function Write-Log {
+    param (
+        [ValidateSet('Info','Warn','Error')][string] $Level,
+        [string] $Message
+    )
+    $timestamp = Get-Date -Format u
+    "$timestamp [$Level] $Message" | Out-File -FilePath $global:LogFile -Append
+}
+
+function Write-ErrorSummary {
+    param ([array] $Errors)
+    if ($Errors.Count -gt 0) {
+        $summaryFile = [System.IO.Path]::ChangeExtension($global:LogFile, '.err.csv')
+        $Errors | Export-Csv -Path $summaryFile -NoTypeInformation
+        Write-Log -Level Info -Message "Error summary written to $summaryFile"
+        return $summaryFile
+    }
+    Write-Log -Level Info -Message "No errors to summarize."
+    return $null
+}
+
+Export-ModuleMember -Function Initialize-Logger, Write-Log, Write-ErrorSummary
+
+# -------------------------
+# File: Get-ConferenceId.ps1
+# -------------------------
+param (
+    [Parameter(Mandatory)][string] $Date,
+    [Parameter(Mandatory)][int]    $startHour,
+    [Parameter(Mandatory)][int]    $endHour
+)
+
+# Load configuration
+$config = Get-Content -Path "./config.json" -Raw | ConvertFrom-Json
+Import-Module $config.GraphHelperModulePath -Force
+Import-Module $config.LoggerModulePath      -Force
+
+# Prepare directories
+$logFolder    = "./Logs"
+Initialize-Logger -LogFolder $logFolder
+Write-Log -Level Info -Message "Script started for date $Date hours $startHour-$endHour"
+
+$outputFolder = $config.OutputFolder
+if (!(Test-Path $outputFolder)) { New-Item -ItemType Directory -Path $outputFolder | Out-Null }
+
+# Acquire token
+try {
+    $token = Get-GraphAuthToken -TenantId $config.TenantId -ClientId $config.ClientId -ClientSecret $config.ClientSecret
+    Write-Log -Level Info -Message "Acquired Graph token."
+} catch {
+    Write-Log -Level Error -Message "Failed to get token: $_"
+    throw
+}
+
+# Main processing
+$errors = @()
+$baseDate = [datetime]::ParseExact($Date, 'yyyy-MM-dd', $null)
+for ($h = $startHour; $h -lt $endHour; $h++) {
+    $hourStr     = '{0:D2}' -f $h
+    $nextHourStr = '{0:D2}' -f ($h + 1)
+    $outfile     = Join-Path $outputFolder "ConfId_${($baseDate.ToString('yyyyMMdd'))}_${hourStr}_${nextHourStr}.csv"
+
+    Write-Log -Level Info -Message "Processing hour $hourStr - $nextHourStr"
+
+    $bag = [System.Collections.Concurrent.ConcurrentBag[PSObject]]::new()
+    $parallelOpts = [System.Threading.Tasks.ParallelOptions]::new()
+    $parallelOpts.MaxDegreeOfParallelism = $config.Parallelism
+
+    [System.Threading.Tasks.Parallel]::ForEach(0..3, $parallelOpts, {
+        param($q)
+        $sliceStart = $baseDate.AddHours($h).AddMinutes($q * 15)
+        $sliceEnd   = $sliceStart.AddMinutes(15)
+        $filter     = "startDateTime ge $($sliceStart.ToString('s'))Z and startDateTime lt $($sliceEnd.ToString('s'))Z"
+        $uri        = "https://graph.microsoft.com/v1.0/communications/callRecords?`$filter=$filter&`$select=id,lastModifiedDateTime,startDateTime,endDateTime,type"
+
+        try {
+            $batch = Invoke-GraphGetWithRetry -Uri $uri -AccessToken $token -MaxRetries $config.MaxRetries -RetryDelaySeconds $config.RetryDelaySeconds
+            foreach ($item in $batch) { $bag.Add($item) }
+            Write-Log -Level Info -Message "Fetched slice $($sliceStart)"
+        } catch {
+            $err = [PSCustomObject]@{ SliceStart = $sliceStart; Error = $_.Exception.Message }
+            $errors += $err
+            Write-Log -Level Error -Message "Error at slice $($sliceStart): $($_.Exception.Message)"
+        }
+    })
+
+    # Export
+    $results = $bag.ToArray() |
+        Sort-Object id -Unique |
+        Select-Object id, lastModifiedDateTime, startDateTime, endDateTime, type
+    $results | Export-Csv -Path $outfile -NoTypeInformation
+    Write-Log -Level Info -Message "Wrote $($results.Count) records to $outfile"
+}
+
+# Error summary
+Write-ErrorSummary -Errors $errors | Out-Null
+Write-Log -Level Info -Message "Script finished."
