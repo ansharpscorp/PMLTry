@@ -1,0 +1,96 @@
+## 📊 Teams Call Quality Anomaly Detection
+
+### Executive Summary Presentation
+
+---
+
+## 🌟 Project Objective
+
+* Proactively detect and summarize large-scale Microsoft Teams call quality issues.
+* Enable insights into user experience degradation.
+* Provide data-driven recommendations for remediation and improvement.
+
+---
+
+## 🏗️ Architecture Overview
+
+```plaintext
+Azure Synapse SQL
+        ↓
+   Python Pipeline
+        ↓
+ML Models:
+- Isolation Forest
+- XGBoost
+- Prophet
+        ↓
+Enriched & Analyzed Data
+        ↓
+  JSON Alerts per Reflexive IP
+        ↓
+Power BI Dashboards & Reports
+```
+
+---
+
+## ⚙️ Technologies Used
+
+* **Azure Synapse SQL** – centralized Teams CDR data source
+* **Python Modular Pipeline**:
+
+  * pandas, scikit-learn, pyodbc
+  * ML Models: Isolation Forest, XGBoost, Prophet
+* **Business Rule Configuration** via `business_rules.json`
+* **Power BI** for visualizing alert intelligence
+
+---
+
+## 📦 Intelligent Alert Structure
+
+* Grouped by `Second Reflexive Local IP Network`
+* Each alert includes:
+
+  * Total anomaly count and affected dates
+  * Count of users, subnets, and conferences (>100 participants)
+  * Breakdown of Media Types (Audio/Video/VBSS)
+  * Network types (Wired/Wifi)
+  * VDI version (1.0 / 2.0) distribution
+  * Most affected capture and render devices
+  * Poor feedback and sentiment analysis
+  * Forecast patterns and remediation suggestions
+
+---
+
+## 🔮 Forecasting & Feedback Analysis
+
+* **Prophet model** used to forecast:
+
+  * When issues might re-occur
+  * Volume of anomalies over time
+* **Feedback analysis**:
+
+  * Poor rating count per UPN/subnet
+  * Sentiment review from feedback text (if any)
+
+---
+
+## 📊 Power BI Dashboards
+
+* Visualize alerts by Reflexive IP
+* Subnet heatmaps and user impact
+* Device type issue trends
+* Daily & weekly forecast patterns
+* Easily filterable by country, region, or department
+
+---
+
+## 🚀 Scalability & Value to Organization
+
+* Config-driven thresholds (jitter, round trip, packet loss, feedback)
+* Focused only on **high-impact, systemic issues**
+* Easily extendable to:
+
+  * Additional KPIs or media types
+  * Device-level diagnostics
+  * Department-based reporting
+* Enables proactive remediation, not just reactive support
