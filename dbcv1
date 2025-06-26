@@ -1,0 +1,47 @@
+import pandas as pd
+import urllib
+from sqlalchemy import create_engine
+
+def get_engine(server, database, username, password):
+    params = urllib.parse.quote_plus(
+        f"Driver={{ODBC Driver 17 for SQL Server}};"
+        f"Server={server};"
+        f"Database={database};"
+        "Authentication=ActiveDirectoryPassword;"
+        f"UID={username};"
+        f"PWD={password};"
+        "Encrypt=yes;TrustServerCertificate=no;"
+        "Connection Timeout=30;"
+        "Command Timeout=300;"
+    )
+    engine = create_engine(f"mssql+pyodbc:///?odbc_connect={params}", fast_executemany=True)
+    return engine
+
+def fetch_data(engine, start_date, end_date):
+    columns = [
+        # ... (all your column names as before) ...
+    ]
+    columns_str = ", ".join(columns)
+    query = f"""
+    SELECT {columns_str}
+    FROM YourTableName WITH (NOLOCK)
+    WHERE [Date] >= '{start_date}' AND [Date] <= '{end_date}'
+    """
+    with engine.connect() as conn:
+        df = pd.read_sql(query, conn)
+    print(f"✅ Pulled {len(df):,} records for {start_date} to {end_date}")
+    return df
+
+
+from db.db_connection import get_engine, fetch_data
+
+# ... your existing code ...
+    engine = get_engine(
+        db_config["server"],
+        db_config["database"],
+        db_config["username"],
+        db_config["password"]
+    )
+    print("✅ Database connection successful!")
+    df = fetch_data(engine, args.start_date, args.end_date)
+# ... rest of your pipeline ...
