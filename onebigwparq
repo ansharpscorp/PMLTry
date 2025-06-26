@@ -13,7 +13,7 @@ config.json
     "business_rules_file": "config/business_rules.json"
 }
 
-
+--------------------------------------------------------
 parquet_downloader.py
 
 import pyodbc
@@ -82,3 +82,98 @@ if __name__ == "__main__":
         chunk_days=config.get("parquet_chunk_days", 1),
         out_dir=config.get("parquet_dir", "parquet_chunks")
     )
+----------------------------------------------------------------------------
+
+main.py
+
+import argparse
+import json
+import os
+import glob
+import pandas as pd
+from datetime import datetime
+from db.db_connection import get_engine, fetch_data
+from features.feature_engineering import clean_and_engineer
+from models.anomaly_detection import detect_anomalies
+from models.xgboost_classifier import train_xgboost_classifier
+from alerts.alert_generator import generate_detailed_alerts, generate_cluster_alerts
+
+def extract_dates_from_filename(filename):
+    # Expects files like cq_chunk_YYYY-MM-DD_YYYY-MM-DD.parquet
+    base = os.path.basename(filename)
+    parts = base.replace(".parquet", "").split("_")
+    if len(parts) < 4:
+        return None, None
+    try:
+        date1 = datetime.strptime(parts[2], "%Y-%m-%d").date()
+        date2 = datetime.strptime(parts[3], "%Y-%m-%d").date()
+        return date1, date2
+    except Exception:
+        return None, None
+
+def load_data_from_parquet(parquet_dir, start_date=None, end_date=None):
+    files = glob.glob(os.path.join(parquet_dir, "*.parquet"))
+    if start_date and end_date:
+        s_date = datetime.strptime(start_date, "%Y-%m-%d").date()
+        e_date = datetime.strptime(end_date, "%Y-%m-%d").date()
+        filtered_files = []
+        for f in files:
+            f_start, f_end = extract_dates_from_filename(f)
+            if f_start and f_end:
+                # File overlaps desired range if either end is within range
+                if (f_start <= e_date and f_end >= s_date):
+                    filtered_files.append(f)
+        files = filtered_files
+    if not files:
+        raise ValueError(f"No parquet files found in {parquet_dir} for the given date range.")
+    dfs = [pd.read_parquet(f) for f in sorted(files)]
+    df = pd.concat(dfs, ignore_index=True)
+    print(f"✅ Loaded {len(df):,} rows from {len(files)} parquet files.")
+    return df
+
+def main():
+    parser = argparse.ArgumentParser(description="Teams CQD Anomaly Detection")
+    parser.add_argument('--start_date', required=False, help='Start Date (YYYY-MM-DD)')
+    parser.add_argument('--end_date', required=False, help='End Date (YYYY-MM-DD)')
+    parser.add_argument('--output_dir', help='Output Directory')
+    args = parser.parse_args()
+
+    with open('config/config.json', 'r') as f:
+        config = json.load(f)
+
+    output_dir = args.output_dir or config.get('output_dir', 'alerts')
+    os.makedirs(output_dir, exist_ok=True)
+
+    data_source = config.get('data_source', 'sql')
+    if data_source == "parquet":
+        parquet_dir = config.get("parquet_dir", "parquet_chunks")
+        df = load_data_from_parquet(
+            parquet_dir,
+            start_date=args.start_date,
+            end_date=args.end_date
+        )
+    else:
+        engine = get_engine(
+            config["server"],
+            config["database"],
+            config["username"],
+            config["password"]
+        )
+        print("✅ Database connection successful!")
+        df = fetch_data(engine, args.start_date, args.end_date)
+
+    with open(config.get("business_rules_file", "config/business_rules.json"), 'r') as f:
+        business_rules = json.load(f)
+
+    df = clean_and_engineer(df, business_rules)
+
+    train_xgboost_classifier(df)
+
+    anomalies = detect_anomalies(df, business_rules)
+
+    generate_detailed_alerts(anomalies, business_rules, output_dir, args.start_date, args.end_date)
+    generate_cluster_alerts(anomalies, business_rules, output_dir, args.start_date, args.end_date)
+    print("Alerts generated at", output_dir)
+
+if __name__ == "__main__":
+    main()
