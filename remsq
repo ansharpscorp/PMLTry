@@ -1,0 +1,59 @@
+import pandas as pd
+import pyodbc
+
+def get_connection(server, database, username, password):
+    conn_str = (
+        f"DRIVER={{ODBC Driver 17 for SQL Server}};"
+        f"SERVER={server};"
+        f"DATABASE={database};"
+        f"UID={username};"
+        f"PWD={password};"
+        "Authentication=ActiveDirectoryPassword;"
+        "Encrypt=yes;TrustServerCertificate=no;"
+        "Connection Timeout=30;"
+        "Command Timeout=300;"
+    )
+    conn = pyodbc.connect(conn_str, autocommit=True)
+    return conn
+
+def fetch_data(conn, start_date, end_date):
+    columns = [
+        "[Date]", "[Session Type]", "[Conference Id]", "[Session Id]", "[Start Time]", "[End Time]",
+        "[First UserType]", "[First is a Caller]", "[First is a Server]", "[First UPN]", "[First Phone Number]",
+        "[First Network Connection Detail]", "[First Reflexive Local IP Network]", "[First Subnet]", "[First IP Address]",
+        "[First Wifi Band]", "[First Client VDI Mode]", "[First Client VDI Connected State]", "[First Client VDI Is Optimized]",
+        "[First Capture Dev]", "[First Capture Dev Name]", "[First Capture Dev Form Factor]", "[First Render Dev]",
+        "[First Render Dev Name]", "[First Render Dev Form Factor]", "[Media Type]", "[Second UserType]", "[Second is a Server]",
+        "[Second UPN]", "[Second Phone Number]", "[Second Network Connection Detail]", "[Second Reflexive Local IP Network]",
+        "[Second Subnet]", "[Second IP Address]", "[Second Wifi Band]", "[Second Client VDI Mode]", "[Second Client VDI Connected State]",
+        "[Second Client VDI Is Optimized]", "[Second Capture Dev]", "[Second Capture Dev Name]", "[Second Capture Dev Form Factor]",
+        "[Second Render Dev]", "[Second Render Dev Name]", "[Second Render Dev Form Factor]", "[First Feedback Text]", "[Second Feedback Text]",
+        "[ClassifiedPoorCall]", "[Poor Reason]", "[Is Media Error]", "[Error Report Sender]", "[Total Stream Count]", "[Audio Stream Count]",
+        "[Audio Poor Stream Count]", "[Video Stream Count]", "[Video Poor Stream Count]", "[Total CDR Available Stream Count]",
+        "[Total Call Setup Failed Stream Count]", "[Total Call Setup Succeeded Stream Count]", "[Total Call Dropped Stream Count]",
+        "[Total Media Failed Stream Count]", "[First Feedback Rating Count]", "[First Feedback Rating Poor Count]",
+        "[Second Feedback Rating Count]", "[Second Feedback Rating Poor Count]", "[Avg Jitter]", "[Avg Jitter Max]", "[Avg Round Trip]",
+        "[Avg Round Trip Max]", "[Avg Packet Loss Rate]", "[Avg Packet Loss Rate Max]", "[Avg Overall Avg Network MOS]", "[Avg Packet Utilization]"
+    ]
+    columns_str = ", ".join(columns)
+    query = f"""
+    SELECT {columns_str}
+    FROM YourTableName WITH (NOLOCK)
+    WHERE [Date] >= '{start_date}' AND [Date] <= '{end_date}'
+    """
+    df = pd.read_sql(query, conn)
+    print(f"✅ Pulled {len(df):,} records for {start_date} to {end_date}")
+    return df
+
+
+
+from db.db_connection import get_connection, fetch_data
+# ...
+    conn = get_connection(
+        db_config["server"],
+        db_config["database"],
+        db_config["username"],
+        db_config["password"]
+    )
+    print("✅ Database connection successful!")
+    df = fetch_data(conn, args.start_date, args.end_date)
