@@ -1,0 +1,84 @@
+config.json
+
+{
+    "data_source": "parquet",
+    "server": "<your_server>.database.windows.net",
+    "database": "<your_database>",
+    "username": "<your_user>@<your_tenant>.com",
+    "password": "<your_password>",
+    "table": "YourTableName",
+    "parquet_dir": "parquet_chunks",
+    "parquet_chunk_days": 1,
+    "output_dir": "alerts",
+    "business_rules_file": "config/business_rules.json"
+}
+
+
+parquet_downloader.py
+
+import pyodbc
+import pandas as pd
+import os
+import json
+import argparse
+
+def get_db_config(config_path="config/config.json"):
+    with open(config_path, "r") as f:
+        return json.load(f)
+
+def download_to_parquet_chunks(
+    server, database, username, password,
+    table,
+    start_date, end_date,
+    chunk_days=1,
+    out_dir="parquet_chunks"
+):
+    if not os.path.exists(out_dir):
+        os.makedirs(out_dir)
+    conn_str = (
+        f"DRIVER={{ODBC Driver 17 for SQL Server}};"
+        f"SERVER={server};"
+        f"DATABASE={database};"
+        f"UID={username};"
+        f"PWD={password};"
+        "Authentication=ActiveDirectoryPassword;"
+        "Encrypt=yes;TrustServerCertificate=no;"
+        "Connection Timeout=30;"
+        "Command Timeout=300;"
+    )
+    conn = pyodbc.connect(conn_str, autocommit=True)
+    date_range = pd.date_range(start=start_date, end=end_date, freq=f"{chunk_days}D")
+    total_rows = 0
+    for i, chunk_start in enumerate(date_range):
+        chunk_end = min(chunk_start + pd.Timedelta(days=chunk_days-1), pd.to_datetime(end_date))
+        query = f"""
+        SELECT * FROM {table} WITH (NOLOCK)
+        WHERE [Date] >= '{chunk_start.date()}' AND [Date] <= '{chunk_end.date()}'
+        """
+        df = pd.read_sql(query, conn)
+        if not df.empty:
+            file_name = f"{out_dir}/cq_chunk_{chunk_start.date()}_{chunk_end.date()}.parquet"
+            df.to_parquet(file_name, index=False)
+            print(f"✅ Saved {len(df):,} rows to {file_name}")
+            total_rows += len(df)
+    conn.close()
+    print(f"✅ All done. Total rows: {total_rows:,}")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Download SQL data in parquet chunks")
+    parser.add_argument('--start_date', required=True, help='Start date (YYYY-MM-DD)')
+    parser.add_argument('--end_date', required=True, help='End date (YYYY-MM-DD)')
+    args = parser.parse_args()
+
+    config = get_db_config()
+    download_to_parquet_chunks(
+        config["server"],
+        config["database"],
+        config["username"],
+        config["password"],
+        table=config.get("table", "YourTableName"),
+        start_date=args.start_date,
+        end_date=args.end_date,
+        chunk_days=config.get("parquet_chunk_days", 1),
+        out_dir=config.get("parquet_dir", "parquet_chunks")
+    )
