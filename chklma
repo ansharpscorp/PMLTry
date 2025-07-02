@@ -1,0 +1,16 @@
+from ollama import chat
+
+# Load code from a local file
+with open('example.py', 'r') as f:
+    code = f.read()
+
+# Use ollama to summarize the code
+response = chat(
+    model='llama3',
+    messages=[
+        {'role': 'user', 'content': f"Summarize the following code:\n\n{code}"}
+    ]
+)
+
+# Output the summary
+print(response['message']['content'])
