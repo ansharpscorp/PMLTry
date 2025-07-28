@@ -1,0 +1,41 @@
+from prophet import Prophet
+import pandas as pd
+
+def forecast_reflexive_ip(df_ip, forecast_days, cols):
+    # Aggregate alert counts by date
+    df_count = (
+        df_ip.groupby(cols["date"])
+        .agg(alerts=(cols["conference_id"], 'count'))
+        .reset_index()
+        .rename(columns={cols["date"]: "ds", "alerts": "y"})
+    )
+
+    if len(df_count) < 2:
+        # Not enough data to forecast
+        return {}
+
+    model = Prophet(daily_seasonality=True)
+    model.fit(df_count)
+
+    future = model.make_future_dataframe(periods=forecast_days)
+    forecast = model.predict(future)
+
+    forecast_tail = forecast[["ds", "yhat"]].tail(forecast_days)
+    forecast_dict = dict(zip(forecast_tail["ds"].dt.strftime("%Y-%m-%d"), forecast_tail["yhat"].round(1)))
+
+    return forecast_dict
+
+
+def add_forecast_column(full_df, summary_df, config):
+    cols = config["columns"]
+    forecast_days = config.get("forecast_days", 7)
+
+    forecast_details = []
+
+    for ip in summary_df["Reflexive IP"]:
+        ip_df = full_df[full_df[cols["reflexive_ip"]] == ip]
+        forecast = forecast_reflexive_ip(ip_df, forecast_days, cols)
+        forecast_details.append(forecast)
+
+    summary_df["ForecastDetails"] = forecast_details
+    return summary_df
