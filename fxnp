@@ -1,0 +1,27 @@
+forecaster
+
+import pandas as pd
+from prophet import Prophet
+
+def generate_forecast(df_group):
+    ts = df_group.groupby('Date').size().reset_index(name='Anomalies')
+    ts.rename(columns={'Date': 'ds', 'Anomalies': 'y'}, inplace=True)
+
+    if len(ts) < 5:
+        return pd.DataFrame(columns=['ds', 'yhat'])  # <-- return empty DataFrame, not list
+
+    model = Prophet(daily_seasonality=True)
+    model.fit(ts)
+    future = model.make_future_dataframe(periods=7)
+    forecast = model.predict(future)
+    return forecast[['ds', 'yhat']].tail(7)
+
+
+summarizer
+
+if not forecast_rows.empty:
+    forecast_dates = ', '.join([str(row['ds'].date()) for _, row in forecast_rows.iterrows()])
+    forecast_summary = ', '.join([f"{row['ds'].date()} ({int(row['yhat'])} est.)" for _, row in forecast_rows.iterrows()])
+else:
+    forecast_dates = "N/A"
+    forecast_summary = "no expected anomalies"
