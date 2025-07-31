@@ -1,0 +1,84 @@
+import pandas as pd
+from datetime import datetime, timedelta
+from prophet import Prophet
+import itertools
+
+def load_data(file_path):
+    df = pd.read_csv(file_path, parse_dates=["Date"])
+    df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+    df.dropna(subset=['Date', 'Reflexive IP', 'UPN', 'Subnet', 'Media Type', 'Anomaly Reason'], inplace=True)
+    return df
+
+def generate_forecast(df_group):
+    ts = df_group.groupby('Date').size().reset_index(name='Anomalies')
+    ts.rename(columns={'Date': 'ds', 'Anomalies': 'y'}, inplace=True)
+
+    if len(ts) < 5:
+        return []
+
+    model = Prophet(daily_seasonality=True)
+    model.fit(ts)
+    future = model.make_future_dataframe(periods=7)
+    forecast = model.predict(future)
+    return forecast[['ds', 'yhat']].tail(7)
+
+def generate_normalized_summary(df):
+    today = pd.Timestamp.today().normalize()
+    last_7 = today - timedelta(days=7)
+    last_30 = today - timedelta(days=30)
+
+    upn_anomaly_count = df['UPN'].value_counts().to_dict()
+    rows = []
+
+    # Group by Reflexive IP, Media Type, Anomaly Reason
+    for (ip, media_type, reason), group_df in df.groupby(['Reflexive IP', 'Media Type', 'Anomaly Reason']):
+        anomaly_count = len(group_df)
+        subnets = sorted(group_df['Subnet'].unique())
+        upns = sorted(group_df['UPN'].unique())
+        start_date = group_df['Date'].min().date()
+        end_date = group_df['Date'].max().date()
+
+        group_7 = group_df[group_df['Date'] >= last_7]
+        group_30 = group_df[group_df['Date'] >= last_30]
+
+        brief_7 = f"{len(group_7)} anomalies in last 7 days." if not group_7.empty else "No anomalies in last 7 days."
+        brief_30 = f"{len(group_30)} anomalies in last 30 days." if not group_30.empty else "No anomalies in last 30 days."
+
+        forecast_rows = generate_forecast(group_df)
+        forecast_dates = ', '.join([str(row['ds'].date()) for _, row in forecast_rows.iterrows()])
+        forecast_summary = ', '.join([f"{row['ds'].date()} ({int(row['yhat'])} est.)" for _, row in forecast_rows.iterrows()])
+
+        story = (
+            f"Reflexive IP {ip} with Media Type '{media_type}' and Anomaly Reason '{reason}' had {anomaly_count} anomalies between {start_date} and {end_date}. "
+            f"Connected subnets: {len(subnets)} and users: {len(upns)}. {brief_7} {brief_30} "
+            f"Forecast indicates: {forecast_summary if forecast_summary else 'no expected anomalies'}."
+        )
+
+        for subnet, upn in itertools.product(subnets, upns):
+            total_upn_count = upn_anomaly_count.get(upn, 0)
+            rows.append({
+                "Reflexive IP": ip,
+                "Subnet": subnet,
+                "UPN": upn,
+                "Media Type": media_type,
+                "Anomaly Reason": reason,
+                "Dates": f"{start_date} to {end_date}",
+                "Forecasted Date(s)": forecast_dates or "N/A",
+                "Anomalies Count": anomaly_count,
+                "Total UPN Anomaly Count": total_upn_count,
+                "Last 7 Days Brief Note": brief_7,
+                "Last 30 Days Brief Note": brief_30,
+                "Story (LLM)": story
+            })
+
+    return pd.DataFrame(rows)
+
+if __name__ == "__main__":
+    input_file = "model_output.csv"
+    output_file = "summary.csv"
+
+    df = load_data(input_file)
+    summary_df = generate_normalized_summary(df)
+    summary_df.to_csv(output_file, index=False)
+
+    print("✅ Final summary with media type, anomaly reason and forecast saved to summary.csv")
