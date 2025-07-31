@@ -19,9 +19,62 @@ def generate_forecast(df_group):
 
 summarizer
 
-if not forecast_rows.empty:
-    forecast_dates = ', '.join([str(row['ds'].date()) for _, row in forecast_rows.iterrows()])
-    forecast_summary = ', '.join([f"{row['ds'].date()} ({int(row['yhat'])} est.)" for _, row in forecast_rows.iterrows()])
-else:
-    forecast_dates = "N/A"
-    forecast_summary = "no expected anomalies"
+import pandas as pd
+import itertools
+from datetime import timedelta
+from forecasting import generate_forecast
+
+def generate_summary(df, today=None):
+    today = today or pd.Timestamp.today().normalize()
+    last_7 = today - timedelta(days=7)
+    last_30 = today - timedelta(days=30)
+    upn_anomaly_count = df['UPN'].value_counts().to_dict()
+
+    rows = []
+
+    for (ip, media_type, reason), group_df in df.groupby(['Reflexive IP', 'Media Type', 'Anomaly Reason']):
+        anomaly_count = len(group_df)
+        subnets = sorted(group_df['Subnet'].unique())
+        upns = sorted(group_df['UPN'].unique())
+        start_date = group_df['Date'].min().date()
+        end_date = group_df['Date'].max().date()
+
+        group_7 = group_df[group_df['Date'] >= last_7]
+        group_30 = group_df[group_df['Date'] >= last_30]
+
+        brief_7 = f"{len(group_7)} anomalies in last 7 days." if not group_7.empty else "No anomalies in last 7 days."
+        brief_30 = f"{len(group_30)} anomalies in last 30 days." if not group_30.empty else "No anomalies in last 30 days."
+
+        forecast_rows = generate_forecast(group_df)
+
+        if not forecast_rows.empty:
+            forecast_dates = ', '.join([str(row['ds'].date()) for _, row in forecast_rows.iterrows()])
+            forecast_summary = ', '.join([f"{row['ds'].date()} ({int(row['yhat'])} est.)" for _, row in forecast_rows.iterrows()])
+        else:
+            forecast_dates = "N/A"
+            forecast_summary = "no expected anomalies"
+
+        story = (
+            f"Reflexive IP {ip} with Media Type '{media_type}' and Anomaly Reason '{reason}' had {anomaly_count} anomalies between {start_date} and {end_date}. "
+            f"Connected subnets: {len(subnets)} and users: {len(upns)}. {brief_7} {brief_30} "
+            f"Forecast indicates: {forecast_summary}."
+        )
+
+        for subnet, upn in itertools.product(subnets, upns):
+            total_upn_count = upn_anomaly_count.get(upn, 0)
+            rows.append({
+                "Reflexive IP": ip,
+                "Subnet": subnet,
+                "UPN": upn,
+                "Media Type": media_type,
+                "Anomaly Reason": reason,
+                "Dates": f"{start_date} to {end_date}",
+                "Forecasted Date(s)": forecast_dates,
+                "Anomalies Count": anomaly_count,
+                "Total UPN Anomaly Count": total_upn_count,
+                "Last 7 Days Brief Note": brief_7,
+                "Last 30 Days Brief Note": brief_30,
+                "Story (LLM)": story
+            })
+
+    return pd.DataFrame(rows)
