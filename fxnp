@@ -20,7 +20,6 @@ def generate_forecast(df_group):
 summarizer
 
 import pandas as pd
-import itertools
 from datetime import timedelta
 from forecasting import generate_forecast
 
@@ -32,10 +31,9 @@ def generate_summary(df, today=None):
 
     rows = []
 
+    # Group by unique combo of IP, Media Type, Anomaly Reason
     for (ip, media_type, reason), group_df in df.groupby(['Reflexive IP', 'Media Type', 'Anomaly Reason']):
         anomaly_count = len(group_df)
-        subnets = sorted(group_df['Subnet'].unique())
-        upns = sorted(group_df['UPN'].unique())
         start_date = group_df['Date'].min().date()
         end_date = group_df['Date'].max().date()
 
@@ -45,8 +43,8 @@ def generate_summary(df, today=None):
         brief_7 = f"{len(group_7)} anomalies in last 7 days." if not group_7.empty else "No anomalies in last 7 days."
         brief_30 = f"{len(group_30)} anomalies in last 30 days." if not group_30.empty else "No anomalies in last 30 days."
 
+        # Forecast
         forecast_rows = generate_forecast(group_df)
-
         if not forecast_rows.empty:
             forecast_dates = ', '.join([str(row['ds'].date()) for _, row in forecast_rows.iterrows()])
             forecast_summary = ', '.join([f"{row['ds'].date()} ({int(row['yhat'])} est.)" for _, row in forecast_rows.iterrows()])
@@ -54,14 +52,19 @@ def generate_summary(df, today=None):
             forecast_dates = "N/A"
             forecast_summary = "no expected anomalies"
 
+        # LLM-style story
         story = (
             f"Reflexive IP {ip} with Media Type '{media_type}' and Anomaly Reason '{reason}' had {anomaly_count} anomalies between {start_date} and {end_date}. "
-            f"Connected subnets: {len(subnets)} and users: {len(upns)}. {brief_7} {brief_30} "
-            f"Forecast indicates: {forecast_summary}."
+            f"{brief_7} {brief_30} Forecast indicates: {forecast_summary}."
         )
 
-        for subnet, upn in itertools.product(subnets, upns):
+        # Use actual subnet-UPN combinations only
+        unique_pairs = group_df[['Subnet', 'UPN']].drop_duplicates()
+        for _, row in unique_pairs.iterrows():
+            subnet = row['Subnet']
+            upn = row['UPN']
             total_upn_count = upn_anomaly_count.get(upn, 0)
+
             rows.append({
                 "Reflexive IP": ip,
                 "Subnet": subnet,
@@ -78,3 +81,4 @@ def generate_summary(df, today=None):
             })
 
     return pd.DataFrame(rows)
+
