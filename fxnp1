@@ -1,0 +1,54 @@
+import pandas as pd
+from datetime import timedelta
+from forecasting import generate_forecast
+
+def generate_summary(df, today=None):
+    today = today or pd.Timestamp.today().normalize()
+    last_7 = today - timedelta(days=7)
+    last_30 = today - timedelta(days=30)
+    upn_anomaly_count = df['UPN'].value_counts().to_dict()
+
+    rows = []
+
+    # Group by Reflexive IP + Subnet + UPN
+    for (ip, subnet, upn), group_df in df.groupby(['Reflexive IP', 'Subnet', 'UPN']):
+        anomaly_count = len(group_df)
+        start_date = group_df['Date'].min().date()
+        end_date = group_df['Date'].max().date()
+
+        count_7 = group_df[group_df['Date'] >= last_7].shape[0]
+        count_30 = group_df[group_df['Date'] >= last_30].shape[0]
+
+        media_types = ', '.join(sorted(group_df['Media Type'].dropna().unique()))
+        reasons = ', '.join(sorted(group_df['Anomaly Reason'].dropna().unique()))
+
+        forecast_rows = generate_forecast(group_df)
+        if not forecast_rows.empty:
+            forecast_dates = ', '.join([str(row['ds'].date()) for _, row in forecast_rows.iterrows()])
+            forecast_summary = ', '.join([f"{row['ds'].date()} ({int(row['yhat'])} est.)" for _, row in forecast_rows.iterrows()])
+        else:
+            forecast_dates = "N/A"
+            forecast_summary = "no expected anomalies"
+
+        story = (
+            f"User {upn} on subnet {subnet} via express route {ip} experienced {anomaly_count} anomalies between {start_date} and {end_date}. "
+            f"Media types: {media_types}. Issues reported: {reasons}. "
+            f"Forecast indicates: {forecast_summary}."
+        )
+
+        rows.append({
+            "Reflexive IP": ip,
+            "Subnet": subnet,
+            "UPN": upn,
+            "Media Types": media_types,
+            "Anomaly Reasons": reasons,
+            "Dates": f"{start_date} to {end_date}",
+            "Forecasted Date(s)": forecast_dates,
+            "Anomalies Count": anomaly_count,
+            "Total UPN Anomaly Count": upn_anomaly_count.get(upn, 0),
+            "Last 7 Days Count": count_7,
+            "Last 30 Days Count": count_30,
+            "Story (LLM)": story
+        })
+
+    return pd.DataFrame(rows)
